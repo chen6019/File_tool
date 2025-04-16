@@ -52,6 +52,8 @@ class ImageConverterApp:
         self.format_combo = ttk.Combobox(mainframe, values=['jpg', 'png', 'webp'], state='readonly')
         self.format_combo.grid(column=1, row=1, sticky=W, padx=5, pady=8)
 
+        ttk.Label(mainframe, text="陈建金版权所有",foreground='red',).grid(column=2, row=1, sticky=W, padx=5, pady=8)
+
         # 输出路径选择
         ttk.Label(mainframe, text="输出路径:").grid(column=0, row=2, sticky=W, padx=5, pady=8)
         self.output_entry = ttk.Entry(mainframe, width=40)
