@@ -50,14 +50,14 @@ class ScreenshotApp:
         self.root.bind("<Control-q>", lambda e: root.quit())
 
     def fullscreen_capture(self):
-        self.status_label.config(text='正在截取全屏...', foreground='blue')
+        self.status_label.config(text='截取全屏', foreground='blue')
         self.root.update()
         screenshot = pyautogui.screenshot()
         self.show_preview(screenshot)
         self.status_label.config(text='准备就绪', foreground='green')
 
     def region_capture(self):
-        self.status_label.config(text='正在选择截图区域...', foreground='blue')
+        self.status_label.config(text='区域截图', foreground='blue')
         self.root.update()
         self.root.withdraw()
         self.region_window = tk.Toplevel(self.root)
@@ -115,11 +115,6 @@ class ScreenshotApp:
                     self.status_banner.itemconfig(self.banner_text, text="截图已保存至：" + file_path)
                     self.status_banner.config(bg='#d4edda')
                     self.status_banner.grid()
-                    self.root.after(3000, lambda: self.status_label.config(
-                        text="陈建金版权所有", 
-                        foreground='red',
-                        font=('Arial', 10))
-                    )
                     self.root.after(3000, self.status_banner.grid_remove)
                 else:
                     self.status_label.config(text="保存已取消", foreground='orange')
