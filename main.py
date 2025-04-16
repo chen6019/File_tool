@@ -13,7 +13,7 @@ class ScreenshotApp:
         self.frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
 
         # 添加截图预览画布
-        self.canvas = tk.Canvas(self.root, width=800, height=600)
+        self.canvas = tk.Canvas(self.root, width=0, height=0)
         self.canvas.grid(row=1, column=0, padx=10, pady=10, sticky=(tk.W, tk.E, tk.N, tk.S))
 
         # 功能按钮
@@ -22,6 +22,10 @@ class ScreenshotApp:
         ttk.Button(self.frame, text="退出", command=root.quit).grid(row=0, column=2, padx=5)
         
         ttk.Button(self.frame, text="保存", command=self.save_image).grid(row=0, column=3, padx=5)
+
+        # 状态提示
+        self.status_label = ttk.Label(self.frame, text="陈建金版权所有", foreground='#333', font=('Arial', 10))
+        self.status_label.grid(row=0, column=4, padx=10)
 
         # 初始化变量
         self.start_x = None
@@ -83,11 +87,17 @@ class ScreenshotApp:
         self.show_preview(self.screenshot)
 
     def save_image(self):
-        if self.screenshot:
-            file_path = filedialog.asksaveasfilename(defaultextension=".png",
-                                                    filetypes=[("PNG", ".png"), ("JPEG", ".jpg")])
-            if file_path:
-                self.screenshot.save(file_path)
+        try:
+            if self.screenshot:
+                file_path = filedialog.asksaveasfilename(defaultextension=".png",
+                                                        filetypes=[("PNG", ".png"), ("JPEG", ".jpg")])
+                if file_path:
+                    self.screenshot.save(file_path)
+                    self.status_label.config(text="保存成功！", foreground='green')
+                else:
+                    self.status_label.config(text="保存已取消", foreground='orange')
+        except Exception as e:
+            self.status_label.config(text=f"保存失败: {str(e)}", foreground='red')
 
     def show_preview(self, image):
         # 初始化缩放相关变量
