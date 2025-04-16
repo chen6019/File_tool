@@ -72,25 +72,58 @@ class ImageConverterApp:
         # 绑定输入文件变化事件
         self.input_entry.bind('<KeyRelease>', self.update_preview)
 
+        # 绑定格式选择变化事件
+        self.format_combo.bind('<<ComboboxSelected>>', self.update_output_path)
+        self.last_auto_path = ""
+
     def select_input(self):
-        filepath = filedialog.askopenfilename(filetypes=[("图片文件", ".jpg .jpeg .png .webp")])
-        if filepath:
+        file_path = filedialog.askopenfilename(filetypes=[("图片文件", ".jpg .jpeg .png .webp")])
+        if file_path:
             self.input_entry.delete(0, END)
-            self.input_entry.insert(0, filepath)
+            self.input_entry.insert(0, file_path)
             self.update_preview()
 
     def select_output(self):
-        dirpath = filedialog.askdirectory()
-        if dirpath:
+        path = filedialog.asksaveasfilename(
+            defaultextension=f".{self.format_combo.get()}",
+            filetypes=[("图片文件", ".jpg .jpeg .png .webp")]
+        )
+        if path:
             self.output_entry.delete(0, END)
-            self.output_entry.insert(0, dirpath)
+            self.output_entry.insert(0, path)
+            self.last_auto_path = path
+
+    def update_output_path(self, event=None):
+        input_path = self.input_entry.get()
+        if os.path.isfile(input_path):
+            base = os.path.splitext(os.path.basename(input_path))[0]
+            output_dir = os.path.dirname(input_path)
+            fmt = self.format_combo.get()
+            new_path = os.path.join(output_dir, f"{base}.{fmt}")
+            
+            # 保留用户手动修改的路径
+            if self.output_entry.get() == self.last_auto_path:
+                self.output_entry.delete(0, END)
+                self.output_entry.insert(0, new_path)
+                self.last_auto_path = new_path
 
     def update_preview(self, event=None):
         input_path = self.input_entry.get()
         if os.path.isfile(input_path):
             try:
+                # 生成默认输出路径
+                base = os.path.splitext(os.path.basename(input_path))[0]
+                output_dir = os.path.dirname(input_path)
+                fmt = self.format_combo.get() or 'jpg'
+                default_path = os.path.join(output_dir, f"{base}.{fmt}")
+                
+                if not self.output_entry.get() or self.output_entry.get() == self.last_auto_path:
+                    self.output_entry.delete(0, END)
+                    self.output_entry.insert(0, default_path)
+                    self.last_auto_path = default_path
+                
+                # 原有预览逻辑
                 img = Image.open(input_path)
-                # 计算缩放比例
                 max_size = 400
                 width, height = img.size
                 ratio = min(max_size/width, max_size/height)
@@ -100,8 +133,31 @@ class ImageConverterApp:
                 photo = ImageTk.PhotoImage(img)
                 self.preview_label.configure(image=photo)
                 self.preview_label.image = photo
+                
+                # 触发路径更新
+                self.update_output_path()
+            
             except Exception as e:
                 self.status_label.config(text=f"预览失败: {str(e)}", foreground='red')
+        else:
+            self.last_auto_path = ""
+
+    def select_input(self):
+        file_path = filedialog.askopenfilename(filetypes=[("图片文件", ".jpg .jpeg .png .webp")])
+        if file_path:
+            self.input_entry.delete(0, END)
+            self.input_entry.insert(0, file_path)
+            self.update_preview()
+
+    def select_output(self):
+        path = filedialog.asksaveasfilename(
+            defaultextension=f".{self.format_combo.get()}",
+            filetypes=[("图片文件", ".jpg .jpeg .png .webp")]
+        )
+        if path:
+            self.output_entry.delete(0, END)
+            self.output_entry.insert(0, path)
+            self.last_auto_path = path
 
     def start_conversion(self):
         input_path = self.input_entry.get()
