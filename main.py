@@ -24,7 +24,7 @@ class ScreenshotApp:
         ttk.Button(self.frame, text="保存", command=self.save_image).grid(row=0, column=3, padx=5)
 
         # 状态提示
-        self.status_label = ttk.Label(self.frame, text="陈建金版权所有", foreground='#333', font=('Arial', 10))
+        self.status_label = ttk.Label(self.frame, text="陈建金版权所有", foreground='red', font=('Arial', 10))
         self.status_label.grid(row=0, column=4, padx=10)
 
         # 初始化变量
