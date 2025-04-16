@@ -25,8 +25,20 @@ class ScreenshotApp:
         ttk.Button(self.frame, text="清除预览", command=self.clear_preview).grid(row=0, column=4, padx=5)
 
         # 状态提示
-        self.status_label = ttk.Label(self.frame, text="陈建金版权所有", foreground='red', font=('Arial', 10))
-        self.status_label.grid(row=1, column=0, padx=10)
+        # 状态提示样式
+        # 版权声明
+        self.copyright_label = ttk.Label(self.root, text="陈建金版权所有", foreground='gray', font=('Arial', 8))
+        self.copyright_label.grid(row=2, column=0, pady=5, sticky=tk.S)
+
+        # 状态提示
+        self.status_label = ttk.Label(self.frame, text="准备就绪", foreground='green', font=('Arial', 10))
+        self.status_label.grid(row=1, column=0, columnspan=5, padx=10, pady=5)
+        
+        # 状态横幅
+        self.status_banner = tk.Canvas(self.root, height=30, bg='#e6f3ff', highlightthickness=0)
+        self.status_banner.grid(row=1, column=0, sticky='ew', padx=10, pady=5)
+        self.banner_text = self.status_banner.create_text(20, 15, anchor='w', font=('微软雅黑', 12, 'bold'), fill='#155724')
+        self.status_banner.grid_remove()
 
         # 初始化变量
         self.start_x = None
@@ -38,10 +50,15 @@ class ScreenshotApp:
         self.root.bind("<Control-q>", lambda e: root.quit())
 
     def fullscreen_capture(self):
+        self.status_label.config(text='正在截取全屏...', foreground='blue')
+        self.root.update()
         screenshot = pyautogui.screenshot()
         self.show_preview(screenshot)
+        self.status_label.config(text='准备就绪', foreground='green')
 
     def region_capture(self):
+        self.status_label.config(text='正在选择截图区域...', foreground='blue')
+        self.root.update()
         self.root.withdraw()
         self.region_window = tk.Toplevel(self.root)
         self.region_window.overrideredirect(True)
@@ -94,7 +111,16 @@ class ScreenshotApp:
                                                         filetypes=[("PNG", ".png"), ("JPEG", ".jpg")])
                 if file_path:
                     self.screenshot.save(file_path)
-                    self.status_label.config(text="保存成功！", foreground='green')
+                    self.status_label.config(text="保存成功！", foreground='#00ff00', font=('Arial', 12, 'bold'))
+                    self.status_banner.itemconfig(self.banner_text, text="截图已保存至：" + file_path)
+                    self.status_banner.config(bg='#d4edda')
+                    self.status_banner.grid()
+                    self.root.after(3000, lambda: self.status_label.config(
+                        text="陈建金版权所有", 
+                        foreground='red',
+                        font=('Arial', 10))
+                    )
+                    self.root.after(3000, self.status_banner.grid_remove)
                 else:
                     self.status_label.config(text="保存已取消", foreground='orange')
         except Exception as e:
@@ -105,7 +131,8 @@ class ScreenshotApp:
         self.canvas.config(width=0, height=0)
         self.screenshot = None
         self.scale_factor = 1.0
-        self.status_label.config(text="预览已清除", foreground='blue')
+        self.status_label.config(text="预览已清除", foreground='blue', font=('Arial', 10))
+        self.status_banner.grid_remove()
         self.root.unbind("<Control-MouseWheel>")
 
     def show_preview(self, image):
