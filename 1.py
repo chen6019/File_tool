@@ -11,6 +11,9 @@ def convert_image(input_path, output_path, format):
             if format.lower() == 'jpg':
                 save_format = 'JPEG'
                 extension = 'jpg'
+                # 转换RGBA模式为RGB
+                if img.mode == 'RGBA':
+                    img = img.convert('RGB')
             else:
                 save_format = format.upper()
                 extension = format.lower()
@@ -173,6 +176,11 @@ class ImageConverterApp:
         try:
             result = convert_image(input_path, output_path, format)
             self.status_label.config(text=result, foreground='green')
+        except ValueError as e:
+            if 'JPEG' in str(e) and 'RGBA' in str(e):
+                self.status_label.config(text="JPEG格式不支持透明背景，请选择PNG格式", foreground='red')
+            else:
+                self.status_label.config(text=f"转换失败: {str(e)}", foreground='red')
         except Exception as e:
             self.status_label.config(text=f"转换失败: {str(e)}", foreground='red')
 
