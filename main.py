@@ -22,10 +22,11 @@ class ScreenshotApp:
         ttk.Button(self.frame, text="退出", command=root.quit).grid(row=0, column=2, padx=5)
         
         ttk.Button(self.frame, text="保存", command=self.save_image).grid(row=0, column=3, padx=5)
+        ttk.Button(self.frame, text="清除预览", command=self.clear_preview).grid(row=0, column=4, padx=5)
 
         # 状态提示
         self.status_label = ttk.Label(self.frame, text="陈建金版权所有", foreground='red', font=('Arial', 10))
-        self.status_label.grid(row=0, column=4, padx=10)
+        self.status_label.grid(row=1, column=0, padx=10)
 
         # 初始化变量
         self.start_x = None
@@ -98,6 +99,14 @@ class ScreenshotApp:
                     self.status_label.config(text="保存已取消", foreground='orange')
         except Exception as e:
             self.status_label.config(text=f"保存失败: {str(e)}", foreground='red')
+
+    def clear_preview(self):
+        self.canvas.delete("all")
+        self.canvas.config(width=0, height=0)
+        self.screenshot = None
+        self.scale_factor = 1.0
+        self.status_label.config(text="预览已清除", foreground='blue')
+        self.root.unbind("<Control-MouseWheel>")
 
     def show_preview(self, image):
         # 初始化缩放相关变量
