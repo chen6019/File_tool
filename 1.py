@@ -32,33 +32,38 @@ class ImageConverterApp:
         self.root.title('图片格式转换器')
         
         # 创建主框架
-        mainframe = ttk.Frame(root, padding="20")
-        mainframe.grid(column=0, row=0, sticky=(N, W, E, S))
+        mainframe = ttk.Frame(root, padding="30 20 30 20")
+        mainframe.grid(column=0, row=0, sticky=(N, W, E, S), padx=20, pady=20)
+
+        # 创建样式对象
+        style = ttk.Style()
+        style.configure('TButton', padding=6)
+        style.configure('TLabel', padding=5)
+        style.configure('TEntry', padding=5)
 
         # 输入文件选择
-        ttk.Label(mainframe, text="输入文件:").grid(column=0, row=0, sticky=W)
+        ttk.Label(mainframe, text="输入文件:").grid(column=0, row=0, sticky=W, padx=5, pady=8)
         self.input_entry = ttk.Entry(mainframe, width=40)
-        self.input_entry.grid(column=1, row=0, sticky=(W, E))
-        ttk.Button(mainframe, text="浏览", command=self.select_input).grid(column=2, row=0, sticky=W)
+        self.input_entry.grid(column=1, row=0, sticky=(W, E), padx=5, pady=8)
+        ttk.Button(mainframe, text="浏览", command=self.select_input).grid(column=2, row=0, sticky=W, padx=5, pady=8)
 
         # 输出格式选择
-        ttk.Label(mainframe, text="目标格式:").grid(column=0, row=1, sticky=W)
+        ttk.Label(mainframe, text="目标格式:").grid(column=0, row=1, sticky=W, padx=5, pady=8)
         self.format_combo = ttk.Combobox(mainframe, values=['jpg', 'png', 'webp'], state='readonly')
-        self.format_combo.grid(column=1, row=1, sticky=W)
-        self.format_combo.current(0)
+        self.format_combo.grid(column=1, row=1, sticky=W, padx=5, pady=8)
 
         # 输出路径选择
-        ttk.Label(mainframe, text="输出路径:").grid(column=0, row=2, sticky=W)
+        ttk.Label(mainframe, text="输出路径:").grid(column=0, row=2, sticky=W, padx=5, pady=8)
         self.output_entry = ttk.Entry(mainframe, width=40)
-        self.output_entry.grid(column=1, row=2, sticky=(W, E))
-        ttk.Button(mainframe, text="浏览", command=self.select_output).grid(column=2, row=2, sticky=W)
+        self.output_entry.grid(column=1, row=2, sticky=(W, E), padx=5, pady=8)
+        ttk.Button(mainframe, text="浏览", command=self.select_output).grid(column=2, row=2, sticky=W, padx=5, pady=8)
 
         # 图片预览区域
         self.preview_label = ttk.Label(mainframe)
-        self.preview_label.grid(column=0, row=3, columnspan=3, pady=10)
+        self.preview_label.grid(column=0, row=3, columnspan=3, pady=15)
 
         # 转换按钮
-        ttk.Button(mainframe, text="开始转换", command=self.start_conversion).grid(column=1, row=4, pady=20)
+        ttk.Button(mainframe, text="开始转换", command=self.start_conversion).grid(column=1, row=4, pady=15, ipadx=10, ipady=5)
 
         # 状态提示
         self.status_label = ttk.Label(mainframe, text="")
