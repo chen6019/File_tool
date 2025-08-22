@@ -282,15 +282,13 @@ class ImageConverterApp:
             g.columnconfigure(i, weight=1)
         row = 0
         ttk.Label(g, text='输入(文件或目录):').grid(row=row, column=0, sticky='w')
-        e_in = ttk.Entry(g, textvariable=self.single_input, width=52)
-        e_in.grid(row=row, column=1, columnspan=3, sticky='we', padx=4)
+        ttk.Entry(g, textvariable=self.single_input, width=52).grid(row=row, column=1, columnspan=3, sticky='we', padx=4)
         ttk.Button(g, text='选择目录', command=self._pick_single_dir).grid(row=row, column=4, padx=2)
         ttk.Button(g, text='选择文件', command=self._pick_single_file).grid(row=row, column=5, padx=2)
         row += 1
 
         ttk.Label(g, text='输出路径:').grid(row=row, column=0, sticky='w')
-        e_out = ttk.Entry(g, textvariable=self.single_output, width=52)
-        e_out.grid(row=row, column=1, columnspan=4, sticky='we', padx=4)
+        ttk.Entry(g, textvariable=self.single_output, width=52).grid(row=row, column=1, columnspan=4, sticky='we', padx=4)
         ttk.Button(g, text='浏览', command=self._pick_single_output).grid(row=row, column=5, padx=2)
         row += 1
 
@@ -298,39 +296,33 @@ class ImageConverterApp:
         fmt_cb = ttk.Combobox(g, textvariable=self.single_format, values=['jpg','png','webp','ico'], state='readonly', width=8)
         fmt_cb.grid(row=row, column=1, sticky='w')
         fmt_cb.bind('<<ComboboxSelected>>', lambda e: self._refresh_ico_frame())
-
         ttk.Checkbutton(g, text='同格式也重新保存', variable=self.process_same_var).grid(row=row, column=2, columnspan=2, sticky='w')
         ttk.Label(g, text='质量:').grid(row=row, column=4, sticky='e')
-        q_scale = ttk.Scale(g, from_=1, to=100, orient='horizontal', variable=self.quality_var)
-        q_scale.grid(row=row, column=5, sticky='we', padx=4)
+        ttk.Scale(g, from_=1, to=100, orient='horizontal', variable=self.quality_var).grid(row=row, column=5, sticky='we', padx=4)
         row += 1
 
-        # ICO 尺寸
         self.ico_frame = ttk.LabelFrame(g, text='ICO 尺寸')
-        ico_sizes = [16, 32, 48, 64, 128, 256]
-        for i, s in enumerate(ico_sizes):
+        for i, s in enumerate([16, 32, 48, 64, 128, 256]):
             var = IntVar(value=1 if s in (16,32,48,256) else 0)
             self.ico_size_vars[s] = var
             ttk.Checkbutton(self.ico_frame, text=str(s), variable=var).grid(row=0, column=i, padx=3, pady=2, sticky='w')
-        btn_all = ttk.Button(self.ico_frame, text='全选', command=lambda: self._set_all_ico(True))
-        btn_all.grid(row=1, column=0, padx=3, pady=2, sticky='w')
-        btn_none = ttk.Button(self.ico_frame, text='全不选', command=lambda: self._set_all_ico(False))
-        btn_none.grid(row=1, column=1, padx=3, pady=2, sticky='w')
+        ttk.Button(self.ico_frame, text='全选', command=lambda: self._set_all_ico(True)).grid(row=1, column=0, padx=3, pady=2, sticky='w')
+        ttk.Button(self.ico_frame, text='全不选', command=lambda: self._set_all_ico(False)).grid(row=1, column=1, padx=3, pady=2, sticky='w')
         self.ico_frame.grid(row=row, column=0, columnspan=6, sticky='w', pady=4)
         row += 1
 
-        # 预览
         self.preview_label = ttk.Label(g, text='(预览)')
         self.preview_label.grid(row=row, column=0, columnspan=6, pady=8)
         row += 1
 
-        # 操作按钮
-        btn_convert = ttk.Button(g, text='开始转换', command=self._convert_single)
-        btn_convert.grid(row=row, column=2, pady=6)
+        ttk.Button(g, text='开始转换', command=self._convert_single).grid(row=row, column=2, pady=6)
         ttk.Button(g, text='刷新预览', command=self._update_preview).grid(row=row, column=3, pady=6)
         row += 1
 
-        # 状态/日志
+        self.single_progress = ttk.Progressbar(g, maximum=100)
+        self.single_progress.grid(row=row, column=0, columnspan=6, sticky='we', pady=4)
+        row += 1
+
         self.single_status = StringVar(value='就绪')
         ttk.Label(g, textvariable=self.single_status, foreground='blue').grid(row=row, column=0, columnspan=6, sticky='w')
         self._refresh_ico_frame()
@@ -357,7 +349,6 @@ class ImageConverterApp:
         fmt_cb.grid(row=row, column=1, sticky='w')
         fmt_cb.bind('<<ComboboxSelected>>', lambda e: self._refresh_batch_ico())
         ttk.Checkbutton(g, text='同格式也重新保存', variable=self.process_same_var).grid(row=row, column=2, columnspan=2, sticky='w')
-
         ttk.Label(g, text='质量:').grid(row=row, column=4, sticky='e')
         ttk.Scale(g, from_=1, to=100, orient='horizontal', variable=self.quality_var).grid(row=row, column=5, sticky='we', padx=4)
         row += 1
@@ -382,10 +373,33 @@ class ImageConverterApp:
         self.batch_ico_frame.grid(row=row, column=0, columnspan=8, sticky='w', pady=4)
         row += 1
 
-        # 进度与日志
         self.progress = ttk.Progressbar(g, maximum=100)
         self.progress.grid(row=row, column=0, columnspan=8, sticky='we', pady=4)
         row += 1
+
+        self.batch_progress_text = StringVar(value='0% (0/0)')
+        self.current_file_text = StringVar(value='当前: -')
+        ttk.Label(g, textvariable=self.batch_progress_text, foreground='green').grid(row=row, column=0, columnspan=2, sticky='w')
+        ttk.Label(g, textvariable=self.current_file_text, foreground='purple').grid(row=row, column=2, columnspan=6, sticky='w')
+        row += 1
+
+        self.log = ttk.Treeview(g, columns=('msg',), show='headings', height=14)
+        self.log.heading('msg', text='日志 (文件 -> 结果)')
+        self.log.column('msg', anchor='w', width=840)
+        self.log.grid(row=row, column=0, columnspan=8, sticky='nsew')
+        g.rowconfigure(row, weight=1)
+        row += 1
+
+        btn_frame = ttk.Frame(g)
+        btn_frame.grid(row=row, column=0, columnspan=8, sticky='we', pady=4)
+        ttk.Button(btn_frame, text='开始批量', command=self._start_batch).pack(side='left', padx=4)
+        ttk.Button(btn_frame, text='取消', command=self._cancel_batch).pack(side='left', padx=4)
+        ttk.Button(btn_frame, text='清空日志', command=lambda: self.log.delete(*self.log.get_children())).pack(side='left', padx=4)
+        ttk.Label(btn_frame, text='占位符: {name} {index} {ext} {fmt}').pack(side='right')
+
+        self.batch_status = StringVar(value='就绪')
+        ttk.Label(g, textvariable=self.batch_status, foreground='blue').grid(row=row+1, column=0, columnspan=8, sticky='w')
+        self._refresh_batch_ico()
         self.log = tk_text = ttk.Treeview(g, columns=('msg',), show='headings', height=14)
         tk_text.heading('msg', text='日志 (文件 -> 结果)')
         tk_text.column('msg', anchor='w', width=840)
@@ -504,9 +518,16 @@ class ImageConverterApp:
                 return
             ensure_dir(outp)
             converted = skipped = failed = 0
+            total = len(files)
+            self.single_progress['maximum'] = total
+            self.single_progress['value'] = 0
             for f in files:
                 if normalize_ext(f) == fmt and not process_same:
                     skipped += 1
+                    self.single_progress['value'] += 1
+                    pct = int(self.single_progress['value'] / total * 100)
+                    self.single_status.set(f'{pct}% 跳过 {os.path.basename(f)}')
+                    self.root.update_idletasks()
                     continue
                 target = os.path.join(outp, f"{os.path.splitext(os.path.basename(f))[0]}.{fmt}")
                 ok, _ = convert_one(f, target, fmt, ico_sizes=ico_sizes, quality=quality)
@@ -514,6 +535,10 @@ class ImageConverterApp:
                     converted += 1
                 else:
                     failed += 1
+                self.single_progress['value'] += 1
+                pct = int(self.single_progress['value'] / total * 100)
+                self.single_status.set(f'{pct}% 处理 {os.path.basename(f)}')
+                self.root.update_idletasks()
             self.single_status.set(f'完成 转换{converted} 跳过{skipped} 失败{failed}')
 
     # --- 批处理事件 ---
@@ -570,6 +595,10 @@ class ImageConverterApp:
         ensure_dir(outp)
         self.progress['value'] = 0
         self.progress['maximum'] = len(files)
+        if hasattr(self, 'batch_progress_text'):
+            self.batch_progress_text.set(f'0% (0/{len(files)})')
+        if hasattr(self, 'current_file_text'):
+            self.current_file_text.set('当前: -')
         for item in self.log.get_children():
             self.log.delete(item)
 
@@ -628,8 +657,23 @@ class ImageConverterApp:
         try:
             while True:
                 msg = self.queue.get_nowait()
-                if msg == 'PROGRESS':
-                    self.progress['value'] = self.progress['value'] + 1
+                if msg.startswith('PROGRESS'):
+                    # PROGRESS processed total filename status
+                    parts = msg.split(' ', 4)
+                    if len(parts) >= 4:
+                        try:
+                            processed = int(parts[1])
+                            total = int(parts[2])
+                            fname = parts[3]
+                            self.progress['maximum'] = total
+                            self.progress['value'] = processed
+                            pct = int(processed / total * 100)
+                            self.batch_progress_text.set(f'{pct}% ({processed}/{total})')
+                            self.current_file_text.set(f'当前: {fname}')
+                            if len(parts) == 5:
+                                self.log.insert('', END, values=(parts[4],))
+                        except Exception:
+                            pass
                 elif msg.startswith('SUMMARY'):
                     self.batch_status.set(msg.replace('SUMMARY ', ''))
                 else:
