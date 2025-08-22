@@ -10,11 +10,11 @@ class ScreenshotApp:
         
         # 创建主界面
         self.frame = ttk.Frame(self.root, padding=10)
-        self.frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        self.frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S)) # type: ignore
 
         # 添加截图预览画布
         self.canvas = tk.Canvas(self.root, width=0, height=0)
-        self.canvas.grid(row=1, column=0, padx=10, pady=10, sticky=(tk.W, tk.E, tk.N, tk.S))
+        self.canvas.grid(row=1, column=0, padx=10, pady=10, sticky=(tk.W, tk.E, tk.N, tk.S)) # type: ignore
 
         # 功能按钮
         ttk.Button(self.frame, text="全屏截图", command=self.fullscreen_capture).grid(row=0, column=0, padx=5)
@@ -182,7 +182,7 @@ class ScreenshotApp:
 
     def end_draw(self, event):
         # 保存当前绘制项
-        if self.current_tool in ['rect', 'arrow']:
+        if self.current_tool in ['rect', 'arrow']: # type: ignore
             item = self.canvas.find_withtag('current')
             if item:
                 self.drawn_items.append(item[0])
@@ -192,18 +192,18 @@ class ScreenshotApp:
         current_x = int(event.x / self.scale_factor)
         current_y = int(event.y / self.scale_factor)
         
-        if self.current_tool == 'rect':
+        if self.current_tool == 'rect': # type: ignore
             self.canvas.create_rectangle(
-                self.start_x * self.scale_factor, 
-                self.start_y * self.scale_factor,
+                self.start_x * self.scale_factor,  # type: ignore
+                self.start_y * self.scale_factor, # type: ignore
                 current_x * self.scale_factor,
                 current_y * self.scale_factor,
                 outline='red'
             )
-        elif self.current_tool == 'arrow':
+        elif self.current_tool == 'arrow': # type: ignore
             self.canvas.create_line(
-                self.start_x * self.scale_factor,
-                self.start_y * self.scale_factor,
+                self.start_x * self.scale_factor, # type: ignore
+                self.start_y * self.scale_factor, # type: ignore
                 current_x * self.scale_factor,
                 current_y * self.scale_factor,
                 arrow=tk.LAST, 
