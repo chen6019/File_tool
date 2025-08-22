@@ -605,6 +605,8 @@ class ImageConverterApp:
         def worker():
             index = start
             converted = skipped = failed = 0
+            processed_count = 0
+            total_files = len(files)
             for f in files:
                 if self.stop_flag.is_set():
                     break
@@ -613,7 +615,8 @@ class ImageConverterApp:
                     skipped += 1
                     self.queue.put(f"SKIP {os.path.basename(f)}")
                     index += step
-                    self.queue.put('PROGRESS')
+                    processed_count += 1
+                    self.queue.put(f"PROGRESS\t{processed_count}\t{total_files}\t{os.path.basename(f)}")
                     continue
                 name_pat = pattern.replace('{fmt}', fmt)
                 final_name = name_pat
@@ -630,7 +633,8 @@ class ImageConverterApp:
                         skipped += 1
                         self.queue.put(f"SKIP {os.path.basename(f)}")
                         index += step
-                        self.queue.put('PROGRESS')
+                        processed_count += 1
+                        self.queue.put(f"PROGRESS\t{processed_count}\t{total_files}\t{os.path.basename(f)}")
                         continue
                     if overwrite_mode == 'rename':
                         out_file = next_non_conflict(out_file)
@@ -641,7 +645,8 @@ class ImageConverterApp:
                     failed += 1
                 self.queue.put(f"{os.path.basename(f)} -> {os.path.basename(out_file)}: {msg}")
                 index += step
-                self.queue.put('PROGRESS')
+                processed_count += 1
+                self.queue.put(f"PROGRESS\t{processed_count}\t{total_files}\t{os.path.basename(f)}")
             self.queue.put(f"SUMMARY 转换{converted} 跳过{skipped} 失败{failed}")
 
         self.worker = threading.Thread(target=worker, daemon=True)
@@ -658,22 +663,32 @@ class ImageConverterApp:
             while True:
                 msg = self.queue.get_nowait()
                 if msg.startswith('PROGRESS'):
-                    # PROGRESS processed total filename status
-                    parts = msg.split(' ', 4)
-                    if len(parts) >= 4:
+                    # Support new tab format or old space format
+                    if '\t' in msg:
                         try:
-                            processed = int(parts[1])
-                            total = int(parts[2])
-                            fname = parts[3]
+                            _tag, processed, total, fname = msg.split('\t', 3)
+                            processed = int(processed); total = int(total)
                             self.progress['maximum'] = total
                             self.progress['value'] = processed
                             pct = int(processed / total * 100)
                             self.batch_progress_text.set(f'{pct}% ({processed}/{total})')
                             self.current_file_text.set(f'当前: {fname}')
-                            if len(parts) == 5:
-                                self.log.insert('', END, values=(parts[4],))
                         except Exception:
                             pass
+                    else:
+                        parts = msg.split(' ', 4)
+                        if len(parts) >= 4:
+                            try:
+                                processed = int(parts[1])
+                                total = int(parts[2])
+                                fname = parts[3]
+                                self.progress['maximum'] = total
+                                self.progress['value'] = processed
+                                pct = int(processed / total * 100)
+                                self.batch_progress_text.set(f'{pct}% ({processed}/{total})')
+                                self.current_file_text.set(f'当前: {fname}')
+                            except Exception:
+                                pass
                 elif msg.startswith('SUMMARY'):
                     self.batch_status.set(msg.replace('SUMMARY ', ''))
                 else:
