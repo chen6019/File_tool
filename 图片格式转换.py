@@ -170,7 +170,6 @@ class ImageConverterApp:
         self.format_combo = ttk.Combobox(mainframe, values=['jpg', 'png', 'webp', 'ico'], state='readonly', width=12)
         self.format_combo.grid(column=1, row=1, sticky=W, padx=4, pady=4)
         self.format_combo.bind('<<ComboboxSelected>>', self.update_output_path)
-        ttk.Label(mainframe, text="陈建金版权所有", foreground='red').grid(column=2, row=1, columnspan=2, sticky=W, padx=4, pady=4)
 
         # 行 2: 同格式处理可选 + 质量
         self.process_same_var = BooleanVar(value=False)
