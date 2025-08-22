@@ -237,7 +237,7 @@ class ImageConverterApp:
         self.root.title('图片格式转换器 (增强版)')
         self.root.geometry('920x600')
 
-        # 变量
+        # 单/目录模式变量
         self.single_input = StringVar()
         self.single_output = StringVar()
         self.single_format = StringVar(value='png')
@@ -245,6 +245,7 @@ class ImageConverterApp:
         self.quality_var = IntVar(value=85)
         self.ico_size_vars: dict[int, IntVar] = {}
 
+        # 批处理变量
         self.batch_input = StringVar()
         self.batch_output = StringVar()
         self.batch_format = StringVar(value='png')
@@ -254,9 +255,12 @@ class ImageConverterApp:
         self.batch_step = IntVar(value=1)
         self.batch_overwrite = StringVar(value='overwrite')
 
+        # 队列与线程控制
         self.queue: "queue.Queue[str]" = queue.Queue()
-        self.stop_flag = threading.Event()
+        self.stop_flag = threading.Event()            # 批处理停止标志
         self.worker: Optional[threading.Thread] = None
+        self.single_worker: Optional[threading.Thread] = None  # 单标签目录线程
+        self.single_stop_flag = threading.Event()
 
         self._build_ui()
         self.root.after(120, self._drain_queue)
@@ -302,7 +306,7 @@ class ImageConverterApp:
         row += 1
 
         self.ico_frame = ttk.LabelFrame(g, text='ICO 尺寸')
-        for i, s in enumerate([16, 32, 48, 64, 128, 256]):
+        for i, s in enumerate([16,32,48,64,128,256]):
             var = IntVar(value=1 if s in (16,32,48,256) else 0)
             self.ico_size_vars[s] = var
             ttk.Checkbutton(self.ico_frame, text=str(s), variable=var).grid(row=0, column=i, padx=3, pady=2, sticky='w')
@@ -315,7 +319,8 @@ class ImageConverterApp:
         self.preview_label.grid(row=row, column=0, columnspan=6, pady=8)
         row += 1
 
-        ttk.Button(g, text='开始转换', command=self._convert_single).grid(row=row, column=2, pady=6)
+        self.btn_single_convert = ttk.Button(g, text='开始转换', command=self._convert_single)
+        self.btn_single_convert.grid(row=row, column=2, pady=6)
         ttk.Button(g, text='刷新预览', command=self._update_preview).grid(row=row, column=3, pady=6)
         row += 1
 
@@ -511,35 +516,48 @@ class ImageConverterApp:
             ok, msg = convert_one(inp, out_file, fmt, ico_sizes=ico_sizes, quality=quality)
             self.single_status.set('成功' if ok else f'失败:{msg}')
         else:
-            # 目录批量 (使用同批处理参数的简化版本)
+            if self.single_worker and self.single_worker.is_alive():
+                self.single_stop_flag.set()
+                self.single_status.set('取消中...')
+                return
             files = list(iter_image_files(inp, recursive=False))
             if not files:
                 self.single_status.set('目录为空')
                 return
             ensure_dir(outp)
-            converted = skipped = failed = 0
-            total = len(files)
-            self.single_progress['maximum'] = total
             self.single_progress['value'] = 0
-            for f in files:
-                if normalize_ext(f) == fmt and not process_same:
-                    skipped += 1
-                    self.single_progress['value'] += 1
-                    pct = int(self.single_progress['value'] / total * 100)
-                    self.single_status.set(f'{pct}% 跳过 {os.path.basename(f)}')
-                    self.root.update_idletasks()
-                    continue
-                target = os.path.join(outp, f"{os.path.splitext(os.path.basename(f))[0]}.{fmt}")
-                ok, _ = convert_one(f, target, fmt, ico_sizes=ico_sizes, quality=quality)
-                if ok:
-                    converted += 1
+            self.single_progress['maximum'] = len(files)
+            self.single_status.set('开始...')
+            self.single_stop_flag.clear()
+            self.btn_single_convert.configure(text='取消')
+
+            def run_dir():
+                converted = skipped = failed = 0
+                total = len(files)
+                processed = 0
+                for f in files:
+                    if self.single_stop_flag.is_set():
+                        break
+                    if normalize_ext(f) == fmt and not process_same:
+                        skipped += 1
+                        ok_flag = True
+                    else:
+                        target = os.path.join(outp, f"{os.path.splitext(os.path.basename(f))[0]}.{fmt}")
+                        ok_flag, _ = convert_one(f, target, fmt, ico_sizes=ico_sizes, quality=quality)
+                        if ok_flag:
+                            converted += 1
+                        else:
+                            failed += 1
+                    processed += 1
+                    pct = int(processed / total * 100)
+                    self.queue.put(f"SINGLEPROG\t{processed}\t{total}\t{pct}\t{os.path.basename(f)}")
+                if self.single_stop_flag.is_set():
+                    self.queue.put("SINGLESUM\t已取消")
                 else:
-                    failed += 1
-                self.single_progress['value'] += 1
-                pct = int(self.single_progress['value'] / total * 100)
-                self.single_status.set(f'{pct}% 处理 {os.path.basename(f)}')
-                self.root.update_idletasks()
-            self.single_status.set(f'完成 转换{converted} 跳过{skipped} 失败{failed}')
+                    self.queue.put(f"SINGLESUM\t转换{converted} 跳过{skipped} 失败{failed}")
+
+            self.single_worker = threading.Thread(target=run_dir, daemon=True)
+            self.single_worker.start()
 
     # --- 批处理事件 ---
     def _pick_batch_dir(self):
@@ -691,6 +709,21 @@ class ImageConverterApp:
                                 pass
                 elif msg.startswith('SUMMARY'):
                     self.batch_status.set(msg.replace('SUMMARY ', ''))
+                elif msg.startswith('SINGLEPROG'):
+                    try:
+                        _, processed, total, pct, fname = msg.split('\t', 4)
+                        processed = int(processed); total = int(total); pct = int(pct)
+                        if total:
+                            self.single_progress['maximum'] = total
+                            self.single_progress['value'] = processed
+                        self.single_status.set(f'{pct}% 处理 {fname}')
+                    except Exception:
+                        pass
+                elif msg.startswith('SINGLESUM'):
+                    self.single_status.set(msg.split('\t',1)[1] if '\t' in msg else msg)
+                    # 复位按钮
+                    if hasattr(self, 'btn_single_convert'):
+                        self.btn_single_convert.configure(text='开始转换')
                 else:
                     self.log.insert('', END, values=(msg,))
         except queue.Empty:
