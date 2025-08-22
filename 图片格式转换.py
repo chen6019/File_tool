@@ -1,407 +1,666 @@
+"""重写版图片格式转换工具
+
+增强点:
+1. 更丰富 UI: Notebook 分单文件/批处理，进度条 & 日志输出，质量滑块，ICO 尺寸全选/反选。
+2. 可自定义批量输出命名模式: {name} 原文件名(无扩展), {index} 序号(起始/步长), {ext} 原扩展。
+3. 递归处理、覆盖策略(覆盖/跳过/改名追加 _newN)、同格式是否强制重新保存。
+4. 针对 jpg/webp/png 的质量可调；PNG 质量映射压缩级别；GIF 动画 -> WebP 动画 / APNG；ICO 多尺寸。
+5. CLI 向下兼容并新增 pattern / recursive / overwrite-mode。
+"""
+
+from __future__ import annotations
 import argparse
-import sys
-from tkinter import Tk, IntVar, BooleanVar, END, W, E, N, S
-from tkinter import ttk, filedialog
-from PIL import Image, ImageTk, ImageSequence
 import os
+import sys
+import threading
+import queue
+from dataclasses import dataclass
+from typing import List, Optional, Tuple, Iterable
+from tkinter import Tk, Toplevel, StringVar, IntVar, BooleanVar, END
+from tkinter import ttk, filedialog, messagebox
+from PIL import Image, ImageTk, ImageSequence
 
-# Pillow LANCZOS 兼容处理（不同版本常量位置不同）
+# ---------- 常量/兼容 ----------
+SUPPORTED_INPUT_EXT = ('.png', '.jpg', '.jpeg', '.webp', '.ico', '.gif')
+
 try:
-    RESAMPLE = Image.Resampling.LANCZOS  # Pillow >= 9.1
-except Exception:
-    RESAMPLE = (
-        getattr(Image, 'LANCZOS', None)
-        or getattr(Image, 'ANTIALIAS', None)
-        or getattr(Image, 'BILINEAR', 1)
-    )
+    RESAMPLE = Image.Resampling.LANCZOS
+except Exception:  # Pillow 旧版本兼容
+    RESAMPLE = getattr(Image, 'LANCZOS', getattr(Image, 'ANTIALIAS', 1))
 
 
-def convert_image(input_path, output_path, target_fmt, ico_sizes=None, quality=None):
-    """转换单个图片文件。
+# ---------- 转换核心 ----------
+def map_png_quality_to_level(q: int) -> int:
+    if q >= 80:
+        return 2
+    if q >= 40:
+        return 4
+    return 6
 
-    input_path: 源文件路径
-    output_path: 如果是文件夹，则输出到该文件夹；如果带扩展名则直接为输出文件路径
-    target_fmt: 目标格式（jpg/png/webp/ico）
-    ico_sizes: ico 时的尺寸列表（整数）
-    返回：结果描述字符串
-    """
+
+def normalize_ext(p: str) -> str:
+    ext = os.path.splitext(p)[1].lower().lstrip('.')
+    if ext in ('jpg', 'jpeg'):
+        return 'jpg'
+    return ext
+
+
+def ensure_dir(path: str):
+    if path and not os.path.exists(path):
+        os.makedirs(path, exist_ok=True)
+
+
+def iter_image_files(root: str, recursive: bool) -> Iterable[str]:
+    if os.path.isfile(root):
+        if root.lower().endswith(SUPPORTED_INPUT_EXT):
+            yield root
+        return
+    for base, dirs, files in os.walk(root):
+        for f in files:
+            if f.lower().endswith(SUPPORTED_INPUT_EXT):
+                yield os.path.join(base, f)
+        if not recursive:
+            break
+
+
+def build_output_filename(pattern: str, src_path: str, index: int, target_fmt: str) -> str:
+    base = os.path.splitext(os.path.basename(src_path))[0]
+    ext = normalize_ext(src_path)
+    name = pattern.replace('{name}', base).replace('{index}', str(index)).replace('{ext}', ext)
+    if '.' not in os.path.basename(name):  # 未指定扩展
+        name += f'.{target_fmt}'
+    return name
+
+
+def next_non_conflict(path: str) -> str:
+    if not os.path.exists(path):
+        return path
+    base, ext = os.path.splitext(path)
+    i = 1
+    while True:
+        cand = f"{base}_new{i}{ext}"
+        if not os.path.exists(cand):
+            return cand
+        i += 1
+
+
+def convert_one(input_path: str, output_file: str, target_fmt: str, ico_sizes: Optional[List[int]] = None, quality: Optional[int] = None) -> Tuple[bool, str]:
     try:
         with Image.open(input_path) as img:
             original_format = (img.format or '').upper()
             is_animated = getattr(img, 'is_animated', False)
             fmt = target_fmt.lower()
-            if fmt == 'jpg':
-                save_format = 'JPEG'
-                extension = 'jpg'
-                if img.mode in ('RGBA', 'LA'):
-                    # JPEG 不支持透明
-                    img = img.convert('RGB')
-                if quality is None:
-                    quality = 85
-            elif fmt == 'ico':
-                save_format = 'ICO'
-                extension = 'ico'
+            save_format = 'JPEG' if fmt == 'jpg' else fmt.upper()
+            params = {}
+
+            # ICO 准备
+            if fmt == 'ico':
                 if img.mode not in ('RGBA', 'RGB'):
                     img = img.convert('RGBA')
                 if not ico_sizes:
                     ico_sizes = [256, 128, 64, 48, 32, 16]
-                ico_sizes = sorted({int(s) for s in ico_sizes if int(s) > 0 and int(s) <= 1024}, reverse=True)
-                ico_size_tuples = [(s, s) for s in ico_sizes]
-            else:
-                save_format = fmt.upper()
-                extension = fmt
-                if save_format == 'WEBP' and quality is None:
+                ico_sizes = sorted({int(s) for s in ico_sizes if 0 < int(s) <= 1024}, reverse=True)
+                params['sizes'] = [(s, s) for s in ico_sizes]
+            elif fmt == 'jpg':
+                if img.mode in ('RGBA', 'LA'):
+                    img = img.convert('RGB')
+                if quality is None:
+                    quality = 85
+                params['quality'] = max(1, min(int(quality), 100))
+                params['optimize'] = True
+                if params['quality'] >= 92:
+                    params['subsampling'] = 0
+            elif fmt == 'webp':
+                if quality is None:
                     quality = 80
-                if save_format == 'PNG' and quality is None:
-                    quality = 100  # PNG 无损，这里仅用于映射压缩等级
-
-            # 判断输出路径是否是文件还是目录
-            if os.path.isdir(output_path) or not os.path.splitext(output_path)[1]:
-                # 目录
-                out_dir = output_path
-                if not os.path.exists(out_dir):
-                    os.makedirs(out_dir, exist_ok=True)
-                base = os.path.splitext(os.path.basename(input_path))[0]
-                out_file = os.path.join(out_dir, f"{base}.{extension}")
-            else:
-                # 明确文件
-                root_no_ext, _ = os.path.splitext(output_path)
-                out_file = f"{root_no_ext}.{extension}"
-
-            params = {}
-            if save_format == 'ICO':
-                params['sizes'] = ico_size_tuples
-            elif save_format == 'JPEG':
-                if quality is not None:
-                    params['quality'] = max(1, min(int(quality), 100))
-                params['optimize'] = True
-                if params.get('quality', 100) >= 92:
-                    params['subsampling'] = 0  # 保留更多颜色
-            elif save_format == 'WEBP':
-                if quality is not None:
-                    params['quality'] = max(1, min(int(quality), 100))
-            elif save_format == 'PNG':
-                # 将“质量”映射到压缩级别(0-9)与优化标志：高质量 -> 更高压缩级别
-                qv = 100 if quality is None else max(1, min(int(quality), 100))
-                # 映射：0-39 -> level 6, 40-79 -> 4, 80-100 -> 2 (速度与体积折中)
-                if qv >= 80:
-                    level = 2
-                elif qv >= 40:
-                    level = 4
-                else:
-                    level = 6
-                params['compress_level'] = level
+                params['quality'] = max(1, min(int(quality), 100))
+            elif fmt == 'png':
+                if quality is None:
+                    quality = 100
+                qv = max(1, min(int(quality), 100))
+                params['compress_level'] = map_png_quality_to_level(qv)
                 params['optimize'] = True
 
-            # GIF 动图特殊处理 (支持 WebP / APNG)
-            if original_format == 'GIF' and is_animated:
-                if save_format == 'WEBP':
-                    frames = []
-                    durations = []
-                    for frame in ImageSequence.Iterator(img):
-                        frames.append(frame.convert('RGBA'))
-                        durations.append(frame.info.get('duration', 100))
-                    frames[0].save(
-                        out_file,
-                        format='WEBP',
-                        save_all=True,
-                        append_images=frames[1:],
-                        loop=0,
-                        duration=durations,
-                        quality=params.get('quality', 80)
-                    )
-                    return f"成功(动图): {os.path.basename(input_path)} -> {os.path.basename(out_file)} (WebP动画)"
-                elif save_format == 'PNG':  # APNG
-                    frames = []
-                    durations = []
-                    for frame in ImageSequence.Iterator(img):
-                        frames.append(frame.convert('RGBA'))
-                        durations.append(frame.info.get('duration', 100))
+            # GIF 动画 -> WebP / APNG / 首帧
+            if original_format == 'GIF' and is_animated and fmt in ('webp', 'png', 'jpg'):
+                frames = []
+                durations = []
+                for fr in ImageSequence.Iterator(img):
+                    frames.append(fr.convert('RGBA'))
+                    durations.append(fr.info.get('duration', 100))
+                if fmt == 'webp':
+                    frames[0].save(output_file, format='WEBP', save_all=True, append_images=frames[1:], loop=0, duration=durations, quality=params.get('quality', 80))
+                    return True, 'WebP动画'
+                if fmt == 'png':
                     try:
-                        frames[0].save(
-                            out_file,
-                            format='PNG',
-                            save_all=True,
-                            append_images=frames[1:],
-                            loop=0,
-                            duration=durations,
-                            disposal=2  # 尽量保持每帧独立
-                        )
-                        return f"成功(动图): {os.path.basename(input_path)} -> {os.path.basename(out_file)} (APNG)"
+                        frames[0].save(output_file, format='PNG', save_all=True, append_images=frames[1:], loop=0, duration=durations, disposal=2)
+                        return True, 'APNG'
                     except Exception:
-                        # 回退首帧
-                        img.seek(0)
-                        first = img.convert('RGBA')
-                        first.save(out_file, format='PNG', **params)
-                        return f"成功(首帧): {os.path.basename(input_path)} -> {os.path.basename(out_file)} (APNG失败回退)"
-                elif save_format == 'JPEG':
-                    # JPEG 不支持动画，取首帧
-                    img.seek(0)
-                    first = img.convert('RGB')
-                    first.save(out_file, format='JPEG', **params)
-                    return f"成功(首帧): {os.path.basename(input_path)} -> {os.path.basename(out_file)}"
+                        frames[0].save(output_file, format='PNG', **params)
+                        return True, 'APNG失败回退首帧'
+                if fmt == 'jpg':
+                    frames[0].convert('RGB').save(output_file, format='JPEG', **params)
+                    return True, '首帧'
 
-            # 普通保存
-            img.save(out_file, format=save_format, **params)
-            return f"成功: {os.path.basename(input_path)} -> {os.path.basename(out_file)}"
+            img.save(output_file, format=save_format, **params)
+            return True, '成功'
     except Exception as e:
-        return f"失败: {os.path.basename(input_path)} ({e})"
+        return False, str(e)
 
 
+# ---------- CLI ----------
+def run_cli():
+    parser = argparse.ArgumentParser(description='图片格式转换工具 (增强版)')
+    parser.add_argument('-i', '--input', required=True, help='输入文件或目录')
+    parser.add_argument('-o', '--output', required=True, help='输出文件或目录')
+    parser.add_argument('-f', '--format', required=True, choices=['jpg', 'png', 'webp', 'ico'], help='目标格式')
+    parser.add_argument('--ico-sizes', help='ICO 尺寸逗号分隔，如 16,32,64,256')
+    parser.add_argument('--process-same', action='store_true', help='源与目标格式相同也重新保存')
+    parser.add_argument('--quality', type=int, help='质量(1-100)')
+    parser.add_argument('--recursive', action='store_true', help='递归处理子目录')
+    parser.add_argument('--pattern', default='{name}.{fmt}', help='批量命名模式，支持 {name} {index} {ext} {fmt}')
+    parser.add_argument('--start', type=int, default=1, help='序号起始 (pattern 有 {index} 时)')
+    parser.add_argument('--step', type=int, default=1, help='序号步长 (pattern 有 {index} 时)')
+    parser.add_argument('--overwrite-mode', choices=['overwrite', 'skip', 'rename'], default='overwrite', help='存在同名文件处理策略')
+    args = parser.parse_args()
+
+    if not os.path.exists(args.input):
+        print('错误：输入不存在')
+        return
+
+    ico_sizes = None
+    if args.format == 'ico':
+        if args.ico_sizes:
+            try:
+                ico_sizes = [int(x) for x in args.ico_sizes.split(',') if x.strip()]
+                ico_sizes = [s for s in ico_sizes if s > 0]
+            except Exception:
+                print('错误：--ico-sizes 无效')
+                return
+        if not ico_sizes:
+            ico_sizes = [256, 128, 64, 48, 32, 16]
+
+    files = list(iter_image_files(args.input, args.recursive))
+    if not files:
+        print('未找到可处理文件')
+        return
+
+    # 输出路径判定
+    out_is_dir = (not os.path.splitext(args.output)[1]) or os.path.isdir(args.output) or len(files) > 1 or os.path.isdir(args.input)
+    if out_is_dir:
+        ensure_dir(args.output)
+
+    index = args.start
+    converted = skipped = failed = 0
+    for f in files:
+        src_ext = normalize_ext(f)
+        if src_ext == args.format and not args.process_same:
+            skipped += 1
+            continue
+        if out_is_dir:
+            pat = args.pattern.replace('{fmt}', args.format)
+            name = pat
+            if '{index}' in pat:
+                name = name.replace('{index}', str(index))
+            name = (name
+                    .replace('{name}', os.path.splitext(os.path.basename(f))[0])
+                    .replace('{ext}', src_ext))
+            if '.' not in os.path.basename(name):
+                name += f'.{args.format}'
+            out_file = os.path.join(args.output, name)
+        else:
+            out_file = args.output
+
+        if os.path.exists(out_file):
+            if args.overwrite_mode == 'skip':
+                skipped += 1
+                index += args.step
+                continue
+            if args.overwrite_mode == 'rename':
+                out_file = next_non_conflict(out_file)
+
+        ok, msg = convert_one(f, out_file, args.format, ico_sizes=ico_sizes, quality=args.quality)
+        if ok:
+            converted += 1
+        else:
+            failed += 1
+        index += args.step
+        print(f"{os.path.basename(f)} -> {os.path.basename(out_file)}: {msg}")
+
+    print(f'完成：转换{converted} 跳过{skipped} 失败{failed}')
+
+
+# ---------- GUI ----------
 class ImageConverterApp:
-    def __init__(self, root):
+    def __init__(self, root: Tk):
         self.root = root
-        self.root.title('图片格式转换器')
+        self.root.title('图片格式转换器 (增强版)')
+        self.root.geometry('920x600')
 
-        mainframe = ttk.Frame(root, padding="18 14 18 14")
-        mainframe.grid(column=0, row=0, sticky="nsew")
-        for i in range(4):
-            mainframe.columnconfigure(i, weight=1)
-
-        # 行 0: 输入
-        ttk.Label(mainframe, text="输入路径:").grid(column=0, row=0, sticky=W, padx=4, pady=4)
-        self.input_entry = ttk.Entry(mainframe, width=46)
-        self.input_entry.grid(column=1, row=0, sticky="we", padx=4, pady=4)
-        ttk.Button(mainframe, text="文件", command=self.select_input).grid(column=2, row=0, padx=2, pady=4, sticky=W)
-        ttk.Button(mainframe, text="文件夹", command=self.select_input_dir).grid(column=3, row=0, padx=2, pady=4, sticky=W)
-
-        # 行 1: 格式 & 版权
-        ttk.Label(mainframe, text="目标格式:").grid(column=0, row=1, sticky=W, padx=4, pady=4)
-        self.format_combo = ttk.Combobox(mainframe, values=['jpg', 'png', 'webp', 'ico'], state='readonly', width=12)
-        self.format_combo.grid(column=1, row=1, sticky=W, padx=4, pady=4)
-        self.format_combo.bind('<<ComboboxSelected>>', self.update_output_path)
-
-        # 行 2: 同格式处理可选 + 质量
+        # 变量
+        self.single_input = StringVar()
+        self.single_output = StringVar()
+        self.single_format = StringVar(value='png')
         self.process_same_var = BooleanVar(value=False)
-        ttk.Checkbutton(mainframe, text="同格式也重新保存", variable=self.process_same_var).grid(column=0, row=2, columnspan=2, sticky=W, padx=4, pady=2)
-        ttk.Label(mainframe, text="质量:").grid(column=2, row=2, sticky=E, padx=4, pady=2)
         self.quality_var = IntVar(value=85)
-        self.quality_spin = ttk.Spinbox(mainframe, from_=1, to=100, textvariable=self.quality_var, width=6)
-        self.quality_spin.grid(column=3, row=2, sticky=W, padx=4, pady=2)
+        self.ico_size_vars: dict[int, IntVar] = {}
 
-        # 行 3: ICO 尺寸
-        self.ico_frame = ttk.LabelFrame(mainframe, text="ICO 尺寸")
-        self.ico_sizes_list = [16, 32, 48, 64, 128, 256]
-        self.ico_size_vars = {}
-        for i, s in enumerate(self.ico_sizes_list):
-            var = IntVar(value=1 if s in (16, 32, 48, 256) else 0)
+        self.batch_input = StringVar()
+        self.batch_output = StringVar()
+        self.batch_format = StringVar(value='png')
+        self.batch_recursive = BooleanVar(value=False)
+        self.batch_pattern = StringVar(value='{name}_{index}.{fmt}')
+        self.batch_start = IntVar(value=1)
+        self.batch_step = IntVar(value=1)
+        self.batch_overwrite = StringVar(value='overwrite')
+
+        self.queue: "queue.Queue[str]" = queue.Queue()
+        self.stop_flag = threading.Event()
+        self.worker: Optional[threading.Thread] = None
+
+        self._build_ui()
+        self.root.after(120, self._drain_queue)
+
+    # UI 构建
+    def _build_ui(self):
+        nb = ttk.Notebook(self.root)
+        nb.pack(fill='both', expand=True)
+
+        frm_single = ttk.Frame(nb, padding=12)
+        frm_batch = ttk.Frame(nb, padding=12)
+        nb.add(frm_single, text='单文件 / 目录')
+        nb.add(frm_batch, text='批处理')
+
+        # --- 单文件 ---
+        self._build_single_tab(frm_single)
+        # --- 批处理 ---
+        self._build_batch_tab(frm_batch)
+
+    def _build_single_tab(self, parent):
+        g = parent
+        for i in range(6):
+            g.columnconfigure(i, weight=1)
+        row = 0
+        ttk.Label(g, text='输入(文件或目录):').grid(row=row, column=0, sticky='w')
+        e_in = ttk.Entry(g, textvariable=self.single_input, width=52)
+        e_in.grid(row=row, column=1, columnspan=3, sticky='we', padx=4)
+        ttk.Button(g, text='选择目录', command=self._pick_single_dir).grid(row=row, column=4, padx=2)
+        ttk.Button(g, text='选择文件', command=self._pick_single_file).grid(row=row, column=5, padx=2)
+        row += 1
+
+        ttk.Label(g, text='输出路径:').grid(row=row, column=0, sticky='w')
+        e_out = ttk.Entry(g, textvariable=self.single_output, width=52)
+        e_out.grid(row=row, column=1, columnspan=4, sticky='we', padx=4)
+        ttk.Button(g, text='浏览', command=self._pick_single_output).grid(row=row, column=5, padx=2)
+        row += 1
+
+        ttk.Label(g, text='目标格式:').grid(row=row, column=0, sticky='w')
+        fmt_cb = ttk.Combobox(g, textvariable=self.single_format, values=['jpg','png','webp','ico'], state='readonly', width=8)
+        fmt_cb.grid(row=row, column=1, sticky='w')
+        fmt_cb.bind('<<ComboboxSelected>>', lambda e: self._refresh_ico_frame())
+
+        ttk.Checkbutton(g, text='同格式也重新保存', variable=self.process_same_var).grid(row=row, column=2, columnspan=2, sticky='w')
+        ttk.Label(g, text='质量:').grid(row=row, column=4, sticky='e')
+        q_scale = ttk.Scale(g, from_=1, to=100, orient='horizontal', variable=self.quality_var)
+        q_scale.grid(row=row, column=5, sticky='we', padx=4)
+        row += 1
+
+        # ICO 尺寸
+        self.ico_frame = ttk.LabelFrame(g, text='ICO 尺寸')
+        ico_sizes = [16, 32, 48, 64, 128, 256]
+        for i, s in enumerate(ico_sizes):
+            var = IntVar(value=1 if s in (16,32,48,256) else 0)
             self.ico_size_vars[s] = var
-            ttk.Checkbutton(self.ico_frame, text=str(s), variable=var).grid(column=i % 6, row=i // 6, padx=3, pady=2, sticky=W)
-        self.ico_frame.grid(column=0, row=3, columnspan=4, sticky=W, padx=4, pady=4)
-        self.ico_frame.grid_remove()  # 默认隐藏
+            ttk.Checkbutton(self.ico_frame, text=str(s), variable=var).grid(row=0, column=i, padx=3, pady=2, sticky='w')
+        btn_all = ttk.Button(self.ico_frame, text='全选', command=lambda: self._set_all_ico(True))
+        btn_all.grid(row=1, column=0, padx=3, pady=2, sticky='w')
+        btn_none = ttk.Button(self.ico_frame, text='全不选', command=lambda: self._set_all_ico(False))
+        btn_none.grid(row=1, column=1, padx=3, pady=2, sticky='w')
+        self.ico_frame.grid(row=row, column=0, columnspan=6, sticky='w', pady=4)
+        row += 1
 
-        # 行 4: 输出
-        ttk.Label(mainframe, text="输出路径(文件或文件夹):").grid(column=0, row=4, sticky=W, padx=4, pady=4)
-        self.output_entry = ttk.Entry(mainframe, width=46)
-        self.output_entry.grid(column=1, row=4, columnspan=2, sticky="we", padx=4, pady=4)
-        ttk.Button(mainframe, text="浏览", command=self.select_output).grid(column=3, row=4, padx=2, pady=4, sticky=W)
+        # 预览
+        self.preview_label = ttk.Label(g, text='(预览)')
+        self.preview_label.grid(row=row, column=0, columnspan=6, pady=8)
+        row += 1
 
-        # 行 5: 预览
-        self.preview_label = ttk.Label(mainframe)
-        self.preview_label.grid(column=0, row=5, columnspan=4, pady=10)
+        # 操作按钮
+        btn_convert = ttk.Button(g, text='开始转换', command=self._convert_single)
+        btn_convert.grid(row=row, column=2, pady=6)
+        ttk.Button(g, text='刷新预览', command=self._update_preview).grid(row=row, column=3, pady=6)
+        row += 1
 
-        # 行 6: 操作
-        ttk.Button(mainframe, text="开始转换", command=self.start_conversion).grid(column=1, row=6, pady=10, ipadx=12)
+        # 状态/日志
+        self.single_status = StringVar(value='就绪')
+        ttk.Label(g, textvariable=self.single_status, foreground='blue').grid(row=row, column=0, columnspan=6, sticky='w')
+        self._refresh_ico_frame()
+        self.single_input.trace_add('write', lambda *a: self._auto_output_single())
 
-        # 行 7: 状态
-        self.status_label = ttk.Label(mainframe, text="", foreground='')
-        self.status_label.grid(column=0, row=7, columnspan=4, sticky=W, padx=4)
+    def _build_batch_tab(self, parent):
+        g = parent
+        for i in range(8):
+            g.columnconfigure(i, weight=1)
+        row = 0
+        ttk.Label(g, text='输入目录:').grid(row=row, column=0, sticky='w')
+        ttk.Entry(g, textvariable=self.batch_input, width=50).grid(row=row, column=1, columnspan=5, sticky='we', padx=4)
+        ttk.Button(g, text='选择', command=self._pick_batch_dir).grid(row=row, column=6, padx=2)
+        ttk.Checkbutton(g, text='递归', variable=self.batch_recursive).grid(row=row, column=7, sticky='w')
+        row += 1
 
-        # 事件
-        self.input_entry.bind('<KeyRelease>', self.update_preview)
-        self.last_auto_path = ''
-        self.toggle_ico_options()
+        ttk.Label(g, text='输出目录:').grid(row=row, column=0, sticky='w')
+        ttk.Entry(g, textvariable=self.batch_output, width=50).grid(row=row, column=1, columnspan=5, sticky='we', padx=4)
+        ttk.Button(g, text='选择', command=self._pick_batch_output).grid(row=row, column=6, padx=2)
+        row += 1
 
-    # 选择源文件
-    def select_input(self):
-        path = filedialog.askopenfilename(filetypes=[("图片文件", ".png .jpg .jpeg .webp .ico .gif")])
-        if path:
-            self.input_entry.delete(0, END)
-            self.input_entry.insert(0, path)
-            self.update_preview()
+        ttk.Label(g, text='目标格式:').grid(row=row, column=0, sticky='w')
+        fmt_cb = ttk.Combobox(g, textvariable=self.batch_format, values=['jpg','png','webp','ico'], width=8, state='readonly')
+        fmt_cb.grid(row=row, column=1, sticky='w')
+        fmt_cb.bind('<<ComboboxSelected>>', lambda e: self._refresh_batch_ico())
+        ttk.Checkbutton(g, text='同格式也重新保存', variable=self.process_same_var).grid(row=row, column=2, columnspan=2, sticky='w')
 
-    # 选择源目录
-    def select_input_dir(self):
-        directory = filedialog.askdirectory()
-        if directory:
-            self.input_entry.delete(0, END)
-            self.input_entry.insert(0, directory)
-            self.preview_label.configure(image='')
-            self._preview_photo = None
-            self.status_label.config(text=f"已选择目录: {directory}")
+        ttk.Label(g, text='质量:').grid(row=row, column=4, sticky='e')
+        ttk.Scale(g, from_=1, to=100, orient='horizontal', variable=self.quality_var).grid(row=row, column=5, sticky='we', padx=4)
+        row += 1
 
-    # 选择输出
-    def select_output(self):
-        fmt = self.format_combo.get() or 'png'
-        path = filedialog.asksaveasfilename(defaultextension=f'.{fmt}',
-                                            filetypes=[("图片文件", ".png .jpg .jpeg .webp .ico .gif")])
-        if path:
-            self.output_entry.delete(0, END)
-            self.output_entry.insert(0, path)
-            self.last_auto_path = path
+        ttk.Label(g, text='命名模式:').grid(row=row, column=0, sticky='e')
+        ttk.Entry(g, textvariable=self.batch_pattern, width=34).grid(row=row, column=1, columnspan=2, sticky='we', padx=4)
+        ttk.Label(g, text='起始/步长:').grid(row=row, column=3, sticky='e')
+        ttk.Spinbox(g, from_=1, to=999999, textvariable=self.batch_start, width=6).grid(row=row, column=4, sticky='w')
+        ttk.Spinbox(g, from_=1, to=9999, textvariable=self.batch_step, width=5).grid(row=row, column=5, sticky='w')
+        ttk.Label(g, text='覆盖策略:').grid(row=row, column=6, sticky='e')
+        ttk.Combobox(g, textvariable=self.batch_overwrite, values=['overwrite','skip','rename'], width=8, state='readonly').grid(row=row, column=7, sticky='w')
+        row += 1
 
-    def update_output_path(self, _evt=None):
-        inp = self.input_entry.get()
+        self.batch_ico_frame = ttk.LabelFrame(g, text='ICO 尺寸')
+        self.batch_ico_vars: dict[int, IntVar] = {}
+        for i, s in enumerate([16,32,48,64,128,256]):
+            v = IntVar(value=1 if s in (16,32,48,256) else 0)
+            self.batch_ico_vars[s] = v
+            ttk.Checkbutton(self.batch_ico_frame, text=str(s), variable=v).grid(row=0, column=i, padx=3, pady=2)
+        ttk.Button(self.batch_ico_frame, text='全选', command=lambda: self._set_all_batch_ico(True)).grid(row=1, column=0, padx=3, sticky='w')
+        ttk.Button(self.batch_ico_frame, text='全不选', command=lambda: self._set_all_batch_ico(False)).grid(row=1, column=1, padx=3, sticky='w')
+        self.batch_ico_frame.grid(row=row, column=0, columnspan=8, sticky='w', pady=4)
+        row += 1
+
+        # 进度与日志
+        self.progress = ttk.Progressbar(g, maximum=100)
+        self.progress.grid(row=row, column=0, columnspan=8, sticky='we', pady=4)
+        row += 1
+        self.log = tk_text = ttk.Treeview(g, columns=('msg',), show='headings', height=14)
+        tk_text.heading('msg', text='日志 (文件 -> 结果)')
+        tk_text.column('msg', anchor='w', width=840)
+        tk_text.grid(row=row, column=0, columnspan=8, sticky='nsew')
+        g.rowconfigure(row, weight=1)
+        row += 1
+
+        btn_frame = ttk.Frame(g)
+        btn_frame.grid(row=row, column=0, columnspan=8, sticky='we', pady=4)
+        ttk.Button(btn_frame, text='开始批量', command=self._start_batch).pack(side='left', padx=4)
+        ttk.Button(btn_frame, text='取消', command=self._cancel_batch).pack(side='left', padx=4)
+        ttk.Button(btn_frame, text='清空日志', command=lambda: self.log.delete(*self.log.get_children())).pack(side='left', padx=4)
+        ttk.Label(btn_frame, text='占位符: {name} {index} {ext} {fmt}').pack(side='right')
+
+        self.batch_status = StringVar(value='就绪')
+        ttk.Label(g, textvariable=self.batch_status, foreground='blue').grid(row=row+1, column=0, columnspan=8, sticky='w')
+        self._refresh_batch_ico()
+
+    # --- 单文件事件 ---
+    def _pick_single_file(self):
+        p = filedialog.askopenfilename(filetypes=[("图片文件", ' '.join(SUPPORTED_INPUT_EXT))])
+        if p:
+            self.single_input.set(p)
+            self._auto_output_single()
+            self._update_preview()
+
+    def _pick_single_dir(self):
+        d = filedialog.askdirectory()
+        if d:
+            self.single_input.set(d)
+            self._auto_output_single()
+            self.preview_label.configure(image='', text='(目录)')
+
+    def _pick_single_output(self):
+        fmt = self.single_format.get()
+        p = filedialog.asksaveasfilename(defaultextension=f'.{fmt}', filetypes=[("图片文件", ' '.join(SUPPORTED_INPUT_EXT))])
+        if p:
+            self.single_output.set(p)
+
+    def _auto_output_single(self):
+        inp = self.single_input.get()
         if os.path.isfile(inp):
             base = os.path.splitext(os.path.basename(inp))[0]
-            fmt = self.format_combo.get()
-            if fmt:
-                auto = os.path.join(os.path.dirname(inp), f"{base}.{fmt}")
-                if not self.output_entry.get() or self.output_entry.get() == self.last_auto_path:
-                    self.output_entry.delete(0, END)
-                    self.output_entry.insert(0, auto)
-                    self.last_auto_path = auto
-        self.toggle_ico_options()
+            fmt = self.single_format.get()
+            self.single_output.set(os.path.join(os.path.dirname(inp), f'{base}.{fmt}'))
 
-    def toggle_ico_options(self):
-        current = (self.format_combo.get() or '').lower()
-        if current == 'ico':
+    def _refresh_ico_frame(self):
+        if self.single_format.get() == 'ico':
             self.ico_frame.grid()
         else:
             self.ico_frame.grid_remove()
-        # 质量输入显示控制
-        if current in ('jpg', 'webp', 'png'):
-            self.quality_spin.state(['!disabled'])
-        else:
-            self.quality_spin.state(['disabled'])
+        # 质量禁用逻辑
+        pass
 
-    def update_preview(self, _evt=None):
-        path = self.input_entry.get()
-        if os.path.isfile(path):
-            try:
-                img = Image.open(path)
-                max_len = 420
+    def _set_all_ico(self, val: bool):
+        for v in self.ico_size_vars.values():
+            v.set(1 if val else 0)
+
+    def _update_preview(self):
+        p = self.single_input.get()
+        if not os.path.isfile(p):
+            return
+        try:
+            with Image.open(p) as img:
                 w, h = img.size
+                max_len = 420
                 scale = min(max_len / w, max_len / h, 1)
                 if scale < 1:
-                    img = img.resize((int(w * scale), int(h * scale)), RESAMPLE)
+                    img = img.resize((int(w*scale), int(h*scale)), RESAMPLE)
                 photo = ImageTk.PhotoImage(img)
-                self.preview_label.configure(image=photo)
-                self._preview_photo = photo
-                self.update_output_path()
-            except Exception as e:
-                self.status_label.config(text=f"预览失败: {e}", foreground='red')
+                self.preview_label.configure(image=photo, text='')
+                self._preview_photo = photo  # 保持引用
+        except Exception as e:
+            self.single_status.set(f'预览失败: {e}')
 
-    def start_conversion(self):
-        inp = self.input_entry.get().strip()
-        outp = self.output_entry.get().strip()
-        fmt = (self.format_combo.get() or '').lower()
-
-        if not inp or not outp or not fmt:
-            self.status_label.config(text='请填写完整信息', foreground='red')
+    def _convert_single(self):
+        inp = self.single_input.get().strip()
+        outp = self.single_output.get().strip()
+        fmt = self.single_format.get()
+        if not inp or not outp:
+            self.single_status.set('请输入输入与输出')
             return
-
-        def norm_ext(p):
-            ext = os.path.splitext(p)[1].lower().lstrip('.')
-            return 'jpg' if ext in ('jpg', 'jpeg') else ext
-
+        if not os.path.exists(inp):
+            self.single_status.set('输入不存在')
+            return
         ico_sizes = None
         if fmt == 'ico':
-            ico_sizes = [s for s, var in self.ico_size_vars.items() if var.get()]
+            ico_sizes = [s for s, v in self.ico_size_vars.items() if v.get()]
             if not ico_sizes:
-                self.status_label.config(text='请至少选择一个 ICO 尺寸', foreground='red')
+                self.single_status.set('请选择 ICO 尺寸')
                 return
-
         process_same = self.process_same_var.get()
+        quality = self.quality_var.get() if fmt in ('jpg','png','webp') else None
 
-        try:
-            if os.path.isfile(inp):
-                if norm_ext(inp) == fmt and not process_same:
-                    self.status_label.config(text='跳过：源与目标格式相同 (未勾选重新保存)', foreground='orange')
-                    return
-                qual = self.quality_var.get() if fmt in ('jpg','webp','png') else None
-                msg = convert_image(inp, outp, fmt, ico_sizes=ico_sizes, quality=qual)
-                self.status_label.config(text=msg, foreground='green' if msg.startswith('成功') else 'red')
+        # 单文件 vs 目录
+        if os.path.isfile(inp):
+            if normalize_ext(inp) == fmt and not process_same:
+                self.single_status.set('跳过(同格式)')
+                return
+            # 输出若为目录
+            if os.path.isdir(outp) or not os.path.splitext(outp)[1]:
+                ensure_dir(outp)
+                out_file = os.path.join(outp, f"{os.path.splitext(os.path.basename(inp))[0]}.{fmt}")
             else:
-                if not os.path.isdir(inp):
-                    self.status_label.config(text='输入路径无效', foreground='red')
-                    return
-                if not os.path.exists(outp):
-                    os.makedirs(outp, exist_ok=True)
-                converted = skipped = failed = 0
-                for name in os.listdir(inp):
-                    if name.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.ico', '.gif')):
-                        src = os.path.join(inp, name)
-                        if norm_ext(src) == fmt and not process_same:
-                            skipped += 1
-                            continue
-                        qual = self.quality_var.get() if fmt in ('jpg','webp','png') else None
-                        r = convert_image(src, outp, fmt, ico_sizes=ico_sizes, quality=qual)
-                        if r.startswith('成功'):
-                            converted += 1
-                        else:
-                            failed += 1
-                self.status_label.config(
-                    text=f'完成：转换{converted} 跳过{skipped} 失败{failed}',
-                    foreground='green' if failed == 0 else 'orange'
-                )
-        except Exception as e:
-            self.status_label.config(text=f'转换失败: {e}', foreground='red')
+                out_dir = os.path.dirname(outp)
+                if out_dir:
+                    ensure_dir(out_dir)
+                out_file = outp
+            ok, msg = convert_one(inp, out_file, fmt, ico_sizes=ico_sizes, quality=quality)
+            self.single_status.set('成功' if ok else f'失败:{msg}')
+        else:
+            # 目录批量 (使用同批处理参数的简化版本)
+            files = list(iter_image_files(inp, recursive=False))
+            if not files:
+                self.single_status.set('目录为空')
+                return
+            ensure_dir(outp)
+            converted = skipped = failed = 0
+            for f in files:
+                if normalize_ext(f) == fmt and not process_same:
+                    skipped += 1
+                    continue
+                target = os.path.join(outp, f"{os.path.splitext(os.path.basename(f))[0]}.{fmt}")
+                ok, _ = convert_one(f, target, fmt, ico_sizes=ico_sizes, quality=quality)
+                if ok:
+                    converted += 1
+                else:
+                    failed += 1
+            self.single_status.set(f'完成 转换{converted} 跳过{skipped} 失败{failed}')
+
+    # --- 批处理事件 ---
+    def _pick_batch_dir(self):
+        d = filedialog.askdirectory()
+        if d:
+            self.batch_input.set(d)
+
+    def _pick_batch_output(self):
+        d = filedialog.askdirectory()
+        if d:
+            self.batch_output.set(d)
+
+    def _refresh_batch_ico(self):
+        if self.batch_format.get() == 'ico':
+            self.batch_ico_frame.grid()
+        else:
+            self.batch_ico_frame.grid_remove()
+
+    # (重复定义移除，已在前面定义 _set_all_batch_ico)
+
+    def _start_batch(self):
+        if self.worker and self.worker.is_alive():
+            messagebox.showinfo('提示', '任务正在进行')
+            return
+        inp = self.batch_input.get().strip()
+        outp = self.batch_output.get().strip()
+        fmt = self.batch_format.get()
+        if not inp or not outp:
+            self.batch_status.set('请输入输入/输出')
+            return
+        if not os.path.isdir(inp):
+            self.batch_status.set('输入目录无效')
+            return
+        ico_sizes = None
+        if fmt == 'ico':
+            ico_sizes = [s for s, v in self.batch_ico_vars.items() if v.get()]
+            if not ico_sizes:
+                self.batch_status.set('请选择 ICO 尺寸')
+                return
+        process_same = self.process_same_var.get()
+        quality = self.quality_var.get() if fmt in ('jpg','png','webp') else None
+        recursive = self.batch_recursive.get()
+        pattern = self.batch_pattern.get()
+        start = self.batch_start.get()
+        step = self.batch_step.get()
+        overwrite_mode = self.batch_overwrite.get()
+        self.stop_flag.clear()
+
+        files = list(iter_image_files(inp, recursive))
+        if not files:
+            self.batch_status.set('无文件')
+            return
+        ensure_dir(outp)
+        self.progress['value'] = 0
+        self.progress['maximum'] = len(files)
+        for item in self.log.get_children():
+            self.log.delete(item)
+
+        def worker():
+            index = start
+            converted = skipped = failed = 0
+            for f in files:
+                if self.stop_flag.is_set():
+                    break
+                src_ext = normalize_ext(f)
+                if src_ext == fmt and not process_same:
+                    skipped += 1
+                    self.queue.put(f"SKIP {os.path.basename(f)}")
+                    index += step
+                    self.queue.put('PROGRESS')
+                    continue
+                name_pat = pattern.replace('{fmt}', fmt)
+                final_name = name_pat
+                if '{index}' in name_pat:
+                    final_name = final_name.replace('{index}', str(index))
+                final_name = (final_name
+                              .replace('{name}', os.path.splitext(os.path.basename(f))[0])
+                              .replace('{ext}', src_ext))
+                if '.' not in os.path.basename(final_name):
+                    final_name += f'.{fmt}'
+                out_file = os.path.join(outp, final_name)
+                if os.path.exists(out_file):
+                    if overwrite_mode == 'skip':
+                        skipped += 1
+                        self.queue.put(f"SKIP {os.path.basename(f)}")
+                        index += step
+                        self.queue.put('PROGRESS')
+                        continue
+                    if overwrite_mode == 'rename':
+                        out_file = next_non_conflict(out_file)
+                ok, msg = convert_one(f, out_file, fmt, ico_sizes=ico_sizes, quality=quality)
+                if ok:
+                    converted += 1
+                else:
+                    failed += 1
+                self.queue.put(f"{os.path.basename(f)} -> {os.path.basename(out_file)}: {msg}")
+                index += step
+                self.queue.put('PROGRESS')
+            self.queue.put(f"SUMMARY 转换{converted} 跳过{skipped} 失败{failed}")
+
+        self.worker = threading.Thread(target=worker, daemon=True)
+        self.worker.start()
+        self.batch_status.set('运行中...')
+
+    def _cancel_batch(self):
+        if self.worker and self.worker.is_alive():
+            self.stop_flag.set()
+            self.batch_status.set('取消中...')
+
+    def _drain_queue(self):
+        try:
+            while True:
+                msg = self.queue.get_nowait()
+                if msg == 'PROGRESS':
+                    self.progress['value'] = self.progress['value'] + 1
+                elif msg.startswith('SUMMARY'):
+                    self.batch_status.set(msg.replace('SUMMARY ', ''))
+                else:
+                    self.log.insert('', END, values=(msg,))
+        except queue.Empty:
+            pass
+        finally:
+            self.root.after(120, self._drain_queue)
+
+    # ICO 批量辅助
+    def _set_all_batch_ico(self, val: bool):
+        for v in self.batch_ico_vars.values():
+            v.set(1 if val else 0)
+
+
+def launch_gui():
+    root = Tk()
+    try:
+        from tkinter import ttk  # noqa: F401
+    except Exception:
+        pass
+    app = ImageConverterApp(root)
+    root.mainloop()
 
 
 def main():
-    if len(sys.argv) > 1:
-        parser = argparse.ArgumentParser(description='图片格式转换工具')
-        parser.add_argument('-i', '--input', required=True, help='输入文件或目录路径')
-        parser.add_argument('-o', '--output', required=True, help='输出文件或目录路径 (单文件时可为文件，全为目录时必须存在或可创建)')
-        parser.add_argument('-f', '--format', required=True, choices=['jpg', 'png', 'webp', 'ico'], help='目标格式')
-        parser.add_argument('--ico-sizes', help='ICO 尺寸列表，逗号分隔，如 16,32,48,256')
-        parser.add_argument('--process-same', action='store_true', help='源格式与目标格式相同时仍重新保存')
-        parser.add_argument('--quality', type=int, help='质量 (1-100)，适用于 jpg/webp/png')
-        args = parser.parse_args()
-
-        if not os.path.exists(args.input):
-            print('错误：输入路径不存在')
-            return
-
-        def norm_ext(p):
-            e = os.path.splitext(p)[1].lower().lstrip('.')
-            return 'jpg' if e in ('jpg', 'jpeg') else e
-
-        ico_sizes = None
-        if args.format == 'ico':
-            if args.ico_sizes:
-                try:
-                    ico_sizes = [int(x.strip()) for x in args.ico_sizes.split(',') if x.strip()]
-                    ico_sizes = [s for s in ico_sizes if s > 0]
-                    if not ico_sizes:
-                        print('错误：无效的 --ico-sizes 参数')
-                        return
-                except Exception:
-                    print('错误：--ico-sizes 需为逗号分隔整数，例如 16,32,64')
-                    return
-            else:
-                ico_sizes = [256, 128, 64, 48, 32, 16]
-
-        if os.path.isfile(args.input):
-            if norm_ext(args.input) != args.format or args.process_same:
-                print(convert_image(args.input, args.output, args.format, ico_sizes=ico_sizes, quality=args.quality))
-            else:
-                print('跳过：源与目标格式相同 (未指定 --process-same)')
-        else:
-            if not os.path.exists(args.output):
-                os.makedirs(args.output, exist_ok=True)
-            converted = skipped = failed = 0
-            for name in os.listdir(args.input):
-                if name.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.ico', '.gif')):
-                    src = os.path.join(args.input, name)
-                    if norm_ext(src) == args.format and not args.process_same:
-                        skipped += 1
-                        continue
-                    r = convert_image(src, args.output, args.format, ico_sizes=ico_sizes, quality=args.quality)
-                    if r.startswith('成功'):
-                        converted += 1
-                    else:
-                        failed += 1
-            print(f'完成：转换{converted} 跳过{skipped} 失败{failed}')
+    if len(sys.argv) > 1 and any(a.startswith('-') for a in sys.argv[1:]):
+        run_cli()
     else:
-        root = Tk()
-        app = ImageConverterApp(root)
-        root.mainloop()
+        launch_gui()
 
 
 if __name__ == '__main__':
-    try:
-        main()
-    except KeyboardInterrupt:
-        print('\n已取消')
+    main()
