@@ -439,10 +439,17 @@ class ImageConverterApp:
             self.preview_label.configure(image='', text='(目录)')
 
     def _pick_single_output(self):
-        fmt = self.single_format.get()
-        p = filedialog.asksaveasfilename(defaultextension=f'.{fmt}', filetypes=[("图片文件", ' '.join(SUPPORTED_INPUT_EXT))])
-        if p:
-            self.single_output.set(p)
+        inp = self.single_input.get().strip()
+        # 目录输入 -> 选择目录，不自动加扩展
+        if inp and os.path.isdir(inp):
+            d = filedialog.askdirectory()
+            if d:
+                self.single_output.set(d)
+        else:
+            fmt = self.single_format.get()
+            p = filedialog.asksaveasfilename(defaultextension=f'.{fmt}', filetypes=[("图片文件", ' '.join(SUPPORTED_INPUT_EXT))])
+            if p:
+                self.single_output.set(p)
 
     def _auto_output_single(self):
         inp = self.single_input.get()
@@ -524,6 +531,14 @@ class ImageConverterApp:
             if not files:
                 self.single_status.set('目录为空')
                 return
+            # 如果输出看起来像被错误添加了扩展（目录模式不应带格式后缀），尝试去掉
+            outp_candidate = outp
+            ext = os.path.splitext(outp_candidate)[1].lower()
+            if ext in ('.jpg', '.jpeg', '.png', '.webp', '.ico') and not os.path.isdir(outp_candidate):
+                trimmed = os.path.splitext(outp_candidate)[0]
+                if trimmed and not os.path.splitext(trimmed)[1]:  # 去掉一次扩展后不再有扩展
+                    outp_candidate = trimmed
+            outp = outp_candidate
             ensure_dir(outp)
             self.single_progress['value'] = 0
             self.single_progress['maximum'] = len(files)
