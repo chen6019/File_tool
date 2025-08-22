@@ -84,7 +84,10 @@ def next_non_conflict(path: str) -> str:
         i += 1
 
 
-def convert_one(input_path: str, output_file: str, target_fmt: str, ico_sizes: Optional[List[int]] = None, quality: Optional[int] = None) -> Tuple[bool, str]:
+def convert_one(input_path: str, output_file: str, target_fmt: str,
+                ico_sizes: Optional[List[int]] = None,
+                quality: Optional[int] = None,
+                png3: bool = False) -> Tuple[bool, str]:
     try:
         with Image.open(input_path) as img:
             original_format = (img.format or '').upper()
@@ -118,8 +121,21 @@ def convert_one(input_path: str, output_file: str, target_fmt: str, ico_sizes: O
                 if quality is None:
                     quality = 100
                 qv = max(1, min(int(quality), 100))
-                params['compress_level'] = map_png_quality_to_level(qv)
-                params['optimize'] = True
+                # 基础压缩映射
+                comp_level = map_png_quality_to_level(qv)
+                if png3:
+                    # 3.0 规范: 更高压缩/优化
+                    comp_level = 9
+                    params['optimize'] = True
+                    # 推荐颜色管理块
+                    try:
+                        img.info['gamma'] = 0.45455  # 1/2.2
+                        img.info['srgb'] = 0  # perceptual rendering intent
+                    except Exception:
+                        pass
+                else:
+                    params['optimize'] = True
+                params['compress_level'] = comp_level
 
             # GIF 动画 -> WebP / APNG / 首帧
             if original_format == 'GIF' and is_animated and fmt in ('webp', 'png', 'jpg'):
@@ -132,12 +148,16 @@ def convert_one(input_path: str, output_file: str, target_fmt: str, ico_sizes: O
                     frames[0].save(output_file, format='WEBP', save_all=True, append_images=frames[1:], loop=0, duration=durations, quality=params.get('quality', 80))
                     return True, 'WebP动画'
                 if fmt == 'png':
-                    try:
-                        frames[0].save(output_file, format='PNG', save_all=True, append_images=frames[1:], loop=0, duration=durations, disposal=2)
-                        return True, 'APNG'
-                    except Exception:
+                    if png3:  # 仅在启用 3.0 规范时尝试 APNG
+                        try:
+                            frames[0].save(output_file, format='PNG', save_all=True, append_images=frames[1:], loop=0, duration=durations, disposal=2)
+                            return True, 'APNG'
+                        except Exception:
+                            frames[0].save(output_file, format='PNG', **params)
+                            return True, 'APNG失败回退首帧'
+                    else:
                         frames[0].save(output_file, format='PNG', **params)
-                        return True, 'APNG失败回退首帧'
+                        return True, '首帧'
                 if fmt == 'jpg':
                     frames[0].convert('RGB').save(output_file, format='JPEG', **params)
                     return True, '首帧'
@@ -162,6 +182,7 @@ def run_cli():
     parser.add_argument('--start', type=int, default=1, help='序号起始 (pattern 有 {index} 时)')
     parser.add_argument('--step', type=int, default=1, help='序号步长 (pattern 有 {index} 时)')
     parser.add_argument('--overwrite-mode', choices=['overwrite', 'skip', 'rename'], default='overwrite', help='存在同名文件处理策略')
+    parser.add_argument('--png3', action='store_true', help='PNG 3.0 规范: 高压缩+颜色块+APNG')
     args = parser.parse_args()
 
     if not os.path.exists(args.input):
@@ -219,7 +240,7 @@ def run_cli():
             if args.overwrite_mode == 'rename':
                 out_file = next_non_conflict(out_file)
 
-        ok, msg = convert_one(f, out_file, args.format, ico_sizes=ico_sizes, quality=args.quality)
+        ok, msg = convert_one(f, out_file, args.format, ico_sizes=ico_sizes, quality=args.quality, png3=args.png3 if args.format == 'png' else False)
         if ok:
             converted += 1
         else:
@@ -243,7 +264,8 @@ class ImageConverterApp:
         self.single_format = StringVar(value='png')
         self.process_same_var = BooleanVar(value=False)
         self.quality_var = IntVar(value=85)
-        self.ico_size_vars: dict[int, IntVar] = {}
+        self.png3_var = BooleanVar(value=False)
+        self.ico_size_vars = {}
 
         # 批处理变量
         self.batch_input = StringVar()
@@ -256,10 +278,10 @@ class ImageConverterApp:
         self.batch_overwrite = StringVar(value='overwrite')
 
         # 队列与线程控制
-        self.queue: "queue.Queue[str]" = queue.Queue()
+        self.queue = queue.Queue()
         self.stop_flag = threading.Event()            # 批处理停止标志
-        self.worker: Optional[threading.Thread] = None
-        self.single_worker: Optional[threading.Thread] = None  # 单标签目录线程
+        self.worker = None
+        self.single_worker = None  # 单标签目录线程
         self.single_stop_flag = threading.Event()
 
         self._build_ui()
@@ -304,7 +326,9 @@ class ImageConverterApp:
         ttk.Label(g, text='质量:').grid(row=row, column=4, sticky='e')
         ttk.Scale(g, from_=1, to=100, orient='horizontal', variable=self.quality_var).grid(row=row, column=5, sticky='we', padx=4)
         row += 1
-
+        ttk.Checkbutton(g, text='PNG 3.0 规范(高压缩+颜色块+APNG)', variable=self.png3_var).grid(row=row, column=0, columnspan=6, sticky='w')
+        row += 1
+        # ICO 尺寸
         self.ico_frame = ttk.LabelFrame(g, text='ICO 尺寸')
         for i, s in enumerate([16,32,48,64,128,256]):
             var = IntVar(value=1 if s in (16,32,48,256) else 0)
@@ -357,6 +381,8 @@ class ImageConverterApp:
         ttk.Label(g, text='质量:').grid(row=row, column=4, sticky='e')
         ttk.Scale(g, from_=1, to=100, orient='horizontal', variable=self.quality_var).grid(row=row, column=5, sticky='we', padx=4)
         row += 1
+        ttk.Checkbutton(g, text='PNG 3.0 规范(高压缩+颜色块+APNG)', variable=self.png3_var).grid(row=row, column=0, columnspan=8, sticky='w')
+        row += 1
 
         ttk.Label(g, text='命名模式:').grid(row=row, column=0, sticky='e')
         ttk.Entry(g, textvariable=self.batch_pattern, width=34).grid(row=row, column=1, columnspan=2, sticky='we', padx=4)
@@ -368,7 +394,7 @@ class ImageConverterApp:
         row += 1
 
         self.batch_ico_frame = ttk.LabelFrame(g, text='ICO 尺寸')
-        self.batch_ico_vars: dict[int, IntVar] = {}
+        self.batch_ico_vars = {}
         for i, s in enumerate([16,32,48,64,128,256]):
             v = IntVar(value=1 if s in (16,32,48,256) else 0)
             self.batch_ico_vars[s] = v
@@ -392,23 +418,6 @@ class ImageConverterApp:
         self.log.heading('msg', text='日志 (文件 -> 结果)')
         self.log.column('msg', anchor='w', width=840)
         self.log.grid(row=row, column=0, columnspan=8, sticky='nsew')
-        g.rowconfigure(row, weight=1)
-        row += 1
-
-        btn_frame = ttk.Frame(g)
-        btn_frame.grid(row=row, column=0, columnspan=8, sticky='we', pady=4)
-        ttk.Button(btn_frame, text='开始批量', command=self._start_batch).pack(side='left', padx=4)
-        ttk.Button(btn_frame, text='取消', command=self._cancel_batch).pack(side='left', padx=4)
-        ttk.Button(btn_frame, text='清空日志', command=lambda: self.log.delete(*self.log.get_children())).pack(side='left', padx=4)
-        ttk.Label(btn_frame, text='占位符: {name} {index} {ext} {fmt}').pack(side='right')
-
-        self.batch_status = StringVar(value='就绪')
-        ttk.Label(g, textvariable=self.batch_status, foreground='blue').grid(row=row+1, column=0, columnspan=8, sticky='w')
-        self._refresh_batch_ico()
-        self.log = tk_text = ttk.Treeview(g, columns=('msg',), show='headings', height=14)
-        tk_text.heading('msg', text='日志 (文件 -> 结果)')
-        tk_text.column('msg', anchor='w', width=840)
-        tk_text.grid(row=row, column=0, columnspan=8, sticky='nsew')
         g.rowconfigure(row, weight=1)
         row += 1
 
@@ -520,7 +529,7 @@ class ImageConverterApp:
                 if out_dir:
                     ensure_dir(out_dir)
                 out_file = outp
-            ok, msg = convert_one(inp, out_file, fmt, ico_sizes=ico_sizes, quality=quality)
+            ok, msg = convert_one(inp, out_file, fmt, ico_sizes=ico_sizes, quality=quality, png3=self.png3_var.get() if fmt=='png' else False)
             self.single_status.set('成功' if ok else f'失败:{msg}')
         else:
             if self.single_worker and self.single_worker.is_alive():
@@ -558,7 +567,7 @@ class ImageConverterApp:
                         ok_flag = True
                     else:
                         target = os.path.join(outp, f"{os.path.splitext(os.path.basename(f))[0]}.{fmt}")
-                        ok_flag, _ = convert_one(f, target, fmt, ico_sizes=ico_sizes, quality=quality)
+                        ok_flag, _ = convert_one(f, target, fmt, ico_sizes=ico_sizes, quality=quality, png3=self.png3_var.get() if fmt=='png' else False)
                         if ok_flag:
                             converted += 1
                         else:
@@ -671,7 +680,7 @@ class ImageConverterApp:
                         continue
                     if overwrite_mode == 'rename':
                         out_file = next_non_conflict(out_file)
-                ok, msg = convert_one(f, out_file, fmt, ico_sizes=ico_sizes, quality=quality)
+                ok, msg = convert_one(f, out_file, fmt, ico_sizes=ico_sizes, quality=quality, png3=self.png3_var.get() if fmt=='png' else False)
                 if ok:
                     converted += 1
                 else:
