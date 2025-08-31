@@ -457,11 +457,29 @@ class ImageConverterApp:
         ttk.Label(g, textvariable=self.current_file_text, foreground='purple').grid(row=row, column=2, columnspan=6, sticky='w')
         row += 1
 
-        self.log = ttk.Treeview(g, columns=('msg',), show='headings', height=14)
-        self.log.heading('msg', text='日志 (文件 -> 结果)')
-        self.log.column('msg', anchor='w', width=840)
-        self.log.grid(row=row, column=0, columnspan=8, sticky='nsew')
+        # 日志 + 预览分栏
+        log_container = ttk.Frame(g)
+        log_container.grid(row=row, column=0, columnspan=8, sticky='nsew')
         g.rowconfigure(row, weight=1)
+        log_container.columnconfigure(0, weight=3)
+        log_container.columnconfigure(1, weight=1)
+        self.log = ttk.Treeview(log_container, columns=('src','dst','result'), show='headings', height=14)
+        for col, txt, w in [('src','源文件',300),('dst','目标文件',300),('result','结果',180)]:
+            self.log.heading(col, text=txt)
+            self.log.column(col, anchor='w', width=w, stretch=True)
+        vsb = ttk.Scrollbar(log_container, orient='vertical', command=self.log.yview)
+        self.log.configure(yscrollcommand=vsb.set)
+        self.log.grid(row=0, column=0, sticky='nsew')
+        vsb.grid(row=0, column=0, sticky='nse')
+        preview_frame = ttk.LabelFrame(log_container, text='预览')
+        preview_frame.grid(row=0, column=1, sticky='nsew', padx=(8,0))
+        preview_frame.columnconfigure(0, weight=1)
+        preview_frame.rowconfigure(0, weight=1)
+        self.batch_preview_label = ttk.Label(preview_frame, text='(选择一条记录)')
+        self.batch_preview_label.grid(row=0, column=0, sticky='nsew', padx=4, pady=4)
+        self.batch_preview_info = StringVar(value='')
+        ttk.Label(preview_frame, textvariable=self.batch_preview_info, foreground='gray').grid(row=1, column=0, sticky='we', padx=4)
+        self.log.bind('<<TreeviewSelect>>', self._on_select_batch_row)
         row += 1
 
         btn_frame = ttk.Frame(g)
@@ -764,7 +782,7 @@ class ImageConverterApp:
                     else:
                         failed += 1
                     processed_count += 1
-                    self.queue.put(f"{os.path.basename(src)} -> {os.path.basename(dst)}: {msg}")
+                    self.queue.put(f"LOG\t{src}\t{dst}\t{msg}\t{1 if ok else 0}")
                     self.queue.put(f"PROGRESS\t{processed_count}\t{total_files}\t{os.path.basename(src)}")
 
             if workers > 1:
@@ -835,12 +853,55 @@ class ImageConverterApp:
                     # 复位按钮
                     if hasattr(self, 'btn_single_convert'):
                         self.btn_single_convert.configure(text='开始转换')
+                elif msg.startswith('LOG\t'):
+                    try:
+                        _tag, src, dst, result, okflag = msg.split('\t', 4)
+                        self.log.insert('', END, values=(os.path.basename(src), os.path.basename(dst), result), tags=('ok' if okflag=='1' else 'fail',))
+                    except Exception:
+                        pass
                 else:
-                    self.log.insert('', END, values=(msg,))
+                    # 兼容旧格式
+                    self.log.insert('', END, values=('', '', msg))
         except queue.Empty:
             pass
         finally:
             self.root.after(120, self._drain_queue)
+
+    def _on_select_batch_row(self, event=None):
+        sel = self.log.selection()
+        if not sel:
+            return
+        iid = sel[0]
+        vals = self.log.item(iid, 'values')
+        if len(vals) < 1:
+            return
+        fname = vals[0]
+        root_dir = self.batch_input.get().strip()
+        target_path = None
+        if os.path.isdir(root_dir):
+            # 简单线性查找首次匹配
+            for p in iter_image_files(root_dir, self.batch_recursive.get()):
+                if os.path.basename(p) == fname:
+                    target_path = p
+                    break
+        if not target_path or not os.path.exists(target_path):
+            self.batch_preview_label.configure(text='文件不存在', image='')
+            self.batch_preview_info.set(fname)
+            return
+        try:
+            with Image.open(target_path) as im:
+                w, h = im.size
+                max_side = 360
+                scale = min(max_side / w, max_side / h, 1)
+                if scale < 1:
+                    im = im.resize((int(w*scale), int(h*scale)), RESAMPLE)
+                photo = ImageTk.PhotoImage(im)
+            self.batch_preview_label.configure(image=photo, text='')
+            self._batch_preview_ref = photo
+            self.batch_preview_info.set(f'{w}x{h} {fname}')
+        except Exception as e:
+            self.batch_preview_label.configure(text=f'预览失败: {e}', image='')
+            self.batch_preview_info.set(fname)
 
     # ICO 批量辅助
     def _set_all_batch_ico(self, val: bool):
