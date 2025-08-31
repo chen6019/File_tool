@@ -603,16 +603,29 @@ def launch_gui():  # type: ignore
 
         def _open_in_explorer(self):
             path = getattr(self, '_last_preview_path', None)
-            if not path:
+            if not path or not os.path.exists(path):
                 return
             try:
                 if sys.platform.startswith('win'):
-                    os.system(f'explorer /select,"{path}"')
-                else:
+                    import subprocess, shlex, pathlib
+                    target = os.path.normpath(path)
+                    # 使用 /select, 让资源管理器定位文件；若失败退回目录
+                    try:
+                        subprocess.run(['explorer', '/select,', target], check=False)
+                    except Exception:
+                        subprocess.run(['explorer', os.path.dirname(target)], check=False)
+                elif sys.platform == 'darwin':  # macOS
+                    import subprocess
+                    try:
+                        subprocess.run(['open', '-R', path], check=False)
+                    except Exception:
+                        subprocess.run(['open', os.path.dirname(path)], check=False)
+                else:  # Linux / others
                     import subprocess
                     subprocess.Popen(['xdg-open', os.path.dirname(path)])
-            except Exception:
-                pass
+            except Exception as e:
+                # 失败静默, 可扩展日志
+                self.status_var.set(f'打开目录失败: {e}')
 
     root = tk.Tk()
     App(root)
