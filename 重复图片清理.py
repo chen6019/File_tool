@@ -25,6 +25,7 @@ import argparse
 import time
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Iterable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     from PIL import Image
@@ -161,6 +162,7 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     p.add_argument('--keep-strategy', choices=['first','largest','largest-file','newest','oldest'], default='largest', help='重复组保留策略')
     p.add_argument('--dry-run', action='store_true', help='仅模拟不执行删除/移动')
     p.add_argument('--report', help='输出报告 txt 文件')
+    p.add_argument('--workers', type=int, default=0, help='并发线程数 (0=自动)')
     return p.parse_args(argv)
 
 
@@ -192,19 +194,22 @@ def main(argv: List[str] | None = None):
     if not all_files:
         print('未找到图片文件')
         return 0
-    print(f'扫描 {len(all_files)} 个文件, 计算哈希...')
+    print(f'扫描 {len(all_files)} 个文件, 计算哈希... (并行: {ns.workers or os.cpu_count()})')
 
     infos: List[ImageInfo] = []
     skipped = 0
     start = time.time()
-    for idx, f in enumerate(all_files, 1):
-        info = compute_info(f)
-        if info:
-            infos.append(info)
-        else:
-            skipped += 1
-        if idx % 200 == 0:
-            print(f'  进度 {idx}/{len(all_files)}')
+    workers = (ns.workers if ns.workers > 0 else (os.cpu_count() or 4)) or 4
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        future_map = {ex.submit(compute_info, f): f for f in all_files}
+        for idx, fut in enumerate(as_completed(future_map), 1):
+            info = fut.result()
+            if info:
+                infos.append(info)
+            else:
+                skipped += 1
+            if idx % 200 == 0 or idx == len(all_files):
+                print(f'  进度 {idx}/{len(all_files)}')
     dur = time.time() - start
     print(f'哈希完成, 有效 {len(infos)}, 失败 {skipped}, 用时 {dur:.2f}s')
 
@@ -277,7 +282,8 @@ def launch_gui():  # type: ignore
     except Exception as e:
         print('无法导入 Tkinter:', e)
         return 1
-    import threading, queue, math
+    import threading, queue, math, os
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     class App:
         def __init__(self, root: 'tk.Tk'):
@@ -304,6 +310,7 @@ def launch_gui():  # type: ignore
             self.action_var = tk.StringVar(value='list')
             self.move_dir_var = tk.StringVar()
             self.dry_run_var = tk.BooleanVar(value=True)
+            self.workers_var = tk.IntVar(value=max(1, (os.cpu_count() or 4)//2))
             # UI
             self._build()
             self.root.after(120, self._drain)
@@ -337,6 +344,13 @@ def launch_gui():  # type: ignore
                 from tkinter import Entry
                 spin = Entry(frm, textvariable=self.threshold_var, width=4)
             spin.grid(row=r, column=7, sticky='w')
+            r += 1
+            ttk.Label(frm, text='线程数:').grid(row=r, column=0, sticky='e')
+            try:
+                ttk.Spinbox(frm, from_=1, to=max(64, (os.cpu_count() or 8)), textvariable=self.workers_var, width=6).grid(row=r, column=1, sticky='w')
+            except Exception:
+                ttk.Entry(frm, textvariable=self.workers_var, width=6).grid(row=r, column=1, sticky='w')
+            # 占位填充行继续原布局
             r += 1
             ttk.Label(frm, text='保留策略:').grid(row=r, column=0, sticky='e')
             ttk.Combobox(frm, textvariable=self.keep_strategy_var, values=['first','largest','largest-file','newest','oldest'], state='readonly', width=12).grid(row=r, column=1, sticky='w')
@@ -471,17 +485,20 @@ def launch_gui():  # type: ignore
                 if not total:
                     self.q.put('STATUS 没有文件')
                     return
-                self.q.put(f'STATUS 计算哈希... 共{total}')
+                self.q.put(f'STATUS 计算哈希... 共{total} 并行:{self.workers_var.get()}')
                 infos: List[ImageInfo] = []
-                for idx, fpath in enumerate(files, 1):
-                    if self.stop_flag.is_set():
-                        break
-                    info = compute_info(fpath)
-                    if info:
-                        infos.append(info)
-                    if idx % 50 == 0 or idx == total:
-                        pct = int(idx/total*100)
-                        self.q.put(f'HASH {idx} {total} {pct}')
+                workers = max(1, self.workers_var.get())
+                with ThreadPoolExecutor(max_workers=workers) as ex:
+                    future_map = {ex.submit(compute_info, fpath): fpath for fpath in files}
+                    for idx, fut in enumerate(as_completed(future_map), 1):
+                        if self.stop_flag.is_set():
+                            break
+                        info = fut.result()
+                        if info:
+                            infos.append(info)
+                        if idx % 50 == 0 or idx == total:
+                            pct = int(idx/total*100)
+                            self.q.put(f'HASH {idx} {total} {pct}')
                 if self.stop_flag.is_set():
                     self.q.put('STATUS 已取消')
                     return

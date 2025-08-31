@@ -29,6 +29,7 @@ import shutil
 import glob
 import fnmatch
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import queue
 import platform
 from dataclasses import dataclass
@@ -204,6 +205,7 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     p.add_argument('--dry-run', action='store_true', help='仅显示将要执行的转换, 不写入')
     p.add_argument('--force', action='store_true', help='输出存在时强制覆盖')
     p.add_argument('--list-encodings', action='store_true', help='列出 Python 已知编码别名并退出')
+    p.add_argument('--workers', type=int, default=0, help='并行线程数(0=自动)')
     return p.parse_args(argv)
 
 
@@ -240,51 +242,72 @@ def main(argv: List[str]) -> int:
     include = [p.strip() for p in (args.include.split(',') if args.include else []) if p.strip()]
     exclude = [p.strip() for p in (args.exclude.split(',') if args.exclude else []) if p.strip()]
 
-    total = converted = skipped = failed = 0
-    changed_files: List[str] = []
+    # 预收集任务
+    tasks: List[Tuple[str, str]] = []  # (src, dst)
     for path in iter_files(inp, args.recursive):
-        rel = os.path.relpath(path, inp) if os.path.isdir(inp) else os.path.basename(path)
         if os.path.isdir(path):
             continue
-        # 若未指定扩展且为目录模式, 默认只处理推测文本扩展
-        if not exts and os.path.isdir(inp):
-            if os.path.splitext(path)[1].lower() not in TEXT_EXT_GUESS:
-                continue
+        rel = os.path.relpath(path, inp) if os.path.isdir(inp) else os.path.basename(path)
+        # 未指定扩展且目录模式时按猜测集过滤
+        if not exts and os.path.isdir(inp) and os.path.splitext(path)[1].lower() not in TEXT_EXT_GUESS:
+            continue
         if not match_filters(path, include, exclude, exts):
             continue
-        total += 1
         if args.in_place:
             dst = path
         else:
             base_out = args.output if args.output else inp
-            if os.path.isfile(inp):
-                dst = base_out
-            else:
-                dst = os.path.join(base_out, rel)
+            dst = base_out if os.path.isfile(inp) else os.path.join(base_out, rel)
+        tasks.append((path, dst))
+
+    total = len(tasks)
+    if total == 0:
+        print('无匹配文件')
+        return 0
+    print(f'待处理文件: {total} (并行: {args.workers or os.cpu_count()})')
+
+    converted = skipped = failed = 0
+    lock = threading.Lock()
+
+    def process_one(idx_path_dst: Tuple[int, Tuple[str,str]]):
+        idx, (src, dst) = idx_path_dst
+        rel = os.path.relpath(src, inp) if os.path.isdir(inp) else os.path.basename(src)
+        # 目标存在判断
         if not args.force and not args.in_place and os.path.exists(dst) and not args.dry_run:
-            print(f'[SKIP] 存在且未覆盖: {rel}')
-            skipped += 1
-            continue
+            return idx, 'SKIP', rel, '存在且未覆盖', False
         # 备份
         if args.in_place and args.backup and not args.dry_run:
-            bak_path = path + args.backup
+            bak_path = src + args.backup
             if not os.path.exists(bak_path):
-                shutil.copy2(path, bak_path)
-        status, msg, changed = convert_file(path, dst, args.from_enc, args.to_enc, args.errors, args.add_bom, args.remove_bom, args.skip_same, args.dry_run)
-        if status == 'OK':
-            print(f'[OK ] {rel} :: {msg}')
-            if changed:
-                converted += 1
-                if changed and not args.dry_run:
-                    changed_files.append(rel)
-            else:
-                skipped += 1
-        elif status == 'SKIP':
-            print(f'[SKIP] {rel} :: {msg}')
-            skipped += 1
-        else:
-            print(f'[FAIL] {rel} :: {msg}')
-            failed += 1
+                try:
+                    shutil.copy2(src, bak_path)
+                except Exception:
+                    pass
+        status, msg, changed = convert_file(src, dst, args.from_enc, args.to_enc, args.errors, args.add_bom, args.remove_bom, args.skip_same, args.dry_run)
+        return idx, status, rel, msg, changed
+
+    workers = (args.workers if args.workers > 0 else (os.cpu_count() or 4)) or 4
+    results: List[Tuple[int,str,str,str,bool]] = []
+    results.extend([(-1,'','','',False)] * total)
+    done = 0
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {ex.submit(process_one, (i, t)): i for i, t in enumerate(tasks)}
+        for fut in as_completed(futures):
+            idx, status, rel, msg, changed = fut.result()
+            with lock:
+                if status == 'OK':
+                    if changed:
+                        converted += 1
+                    else:
+                        skipped += 1
+                elif status == 'SKIP':
+                    skipped += 1
+                else:
+                    failed += 1
+                done += 1
+                pct = int(done/total*100)
+                tag = 'OK ' if status == 'OK' else status
+                print(f'[{tag:4}] {rel} :: {msg}  ({pct}% {done}/{total})')
     print('-'*60)
     print(f'文件总数: {total}  转换: {converted}  跳过: {skipped}  失败: {failed}')
     if args.dry_run:
@@ -332,6 +355,7 @@ class GUIApp:
         self.var_dry = tk.BooleanVar(value=False)
         self.var_force = tk.BooleanVar(value=False)
         self.var_errors = tk.StringVar(value='strict')
+        self.var_workers = tk.IntVar(value=max(1, (os.cpu_count() or 4)//2))
         self.progress_var = tk.IntVar(value=0)
         self.status_var = tk.StringVar(value='就绪')
         self.progress = None  # type: ignore
@@ -362,6 +386,12 @@ class GUIApp:
         ttk.Combobox(frm, textvariable=self.var_to, width=14, values=['utf-8','utf-8-sig','gbk','gb18030','big5','shift_jis','euc_jp','euc_kr','latin-1','utf-16','utf-16le','utf-16be']).grid(row=r, column=3, sticky='w')
         ttk.Label(frm, text='错误:').grid(row=r, column=4, sticky='e')
         ttk.Combobox(frm, textvariable=self.var_errors, width=10, values=['strict','ignore','replace'], state='readonly').grid(row=r, column=5, sticky='w')
+        r += 1
+        ttk.Label(frm, text='并行线程:').grid(row=r, column=0, sticky='w')
+        try:
+            ttk.Spinbox(frm, from_=1, to=max(64, (os.cpu_count() or 8)), textvariable=self.var_workers, width=8).grid(row=r, column=1, sticky='w')
+        except Exception:  # 兼容无 ttk.Spinbox 的环境
+            ttk.Entry(frm, textvariable=self.var_workers, width=8).grid(row=r, column=1, sticky='w')
         r += 1
         ttk.Button(frm, text='编码说明', command=self._show_encoding_info).grid(row=r, column=0, sticky='w', pady=2)
         ttk.Button(frm, text='选项说明', command=self._show_option_info).grid(row=r, column=1, sticky='w', pady=2)
@@ -646,20 +676,32 @@ class GUIApp:
             backup = self.var_backup.get().strip()
             outdir = self.var_output.get().strip()
             converted = skipped = failed = 0
-            for idx, fpath in enumerate(files, 1):
-                if self.stop_flag.is_set():
-                    self.queue.put('STATUS 已取消')
-                    break
+            workers = max(1, self.var_workers.get())
+            # 预构建任务
+            task_specs: List[Tuple[str,str,str]] = []  # (src,dst,rel)
+            for fpath in files:
                 if inplace:
                     dst = fpath
                 else:
                     rel = os.path.relpath(fpath, inp) if os.path.isdir(inp) else os.path.basename(fpath)
                     dst = os.path.join(outdir, rel)
-                    if not force and os.path.exists(dst) and not dry_run:
-                        self.queue.put(f'LOG [SKIP] {rel} :: 目标存在')
-                        skipped += 1
-                        self.queue.put(f'PROG {idx} {total}')
-                        continue
+                relname = os.path.relpath(fpath, inp) if os.path.isdir(inp) else os.path.basename(fpath)
+                task_specs.append((fpath, dst, relname))
+
+            prog_lock = threading.Lock()
+            done = 0
+            def job(spec: Tuple[str,str,str]):
+                nonlocal converted, skipped, failed, done
+                fpath, dst, relname = spec
+                if self.stop_flag.is_set():
+                    return
+                # 覆盖判断
+                if (not inplace) and (not force) and os.path.exists(dst) and not dry_run:
+                    with prog_lock:
+                        skipped += 1; done += 1
+                        self.queue.put(f'LOG [SKIP] {relname} :: 目标存在')
+                        self.queue.put(f'PROG {done} {total}')
+                    return
                 if inplace and backup and not dry_run:
                     bak = fpath + backup
                     if not os.path.exists(bak):
@@ -668,18 +710,27 @@ class GUIApp:
                         except Exception:
                             pass
                 status, msg, changed = convert_file(fpath, dst, from_enc, to_enc, errors_mode, add_bom, remove_bom, skip_same, dry_run)
-                relname = os.path.relpath(fpath, inp) if os.path.isdir(inp) else os.path.basename(fpath)
-                if status == 'OK':
-                    if changed:
-                        converted += 1
-                    else:
+                with prog_lock:
+                    if status == 'OK':
+                        if changed:
+                            converted += 1
+                        else:
+                            skipped += 1
+                    elif status == 'SKIP':
                         skipped += 1
-                elif status == 'SKIP':
-                    skipped += 1
-                else:
-                    failed += 1
-                self.queue.put(f'LOG [{status}] {relname} :: {msg}')
-                self.queue.put(f'PROG {idx} {total}')
+                    else:
+                        failed += 1
+                    done += 1
+                    self.queue.put(f'LOG [{status}] {relname} :: {msg}')
+                    self.queue.put(f'PROG {done} {total}')
+
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                for spec in task_specs:
+                    ex.submit(job, spec)
+                # 等待线程池结束 (隐式 join upon exit)
+            if self.stop_flag.is_set():
+                self.queue.put('STATUS 已取消')
+                return
             self.queue.put(f'SUM 转换{converted} 跳过{skipped} 失败{failed}')
         except Exception as e:  # pragma: no cover
             self.queue.put(f'STATUS 失败: {e}')

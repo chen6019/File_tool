@@ -14,11 +14,15 @@ import os
 import sys
 import threading
 import queue
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Iterable
 from tkinter import Tk, Toplevel, StringVar, IntVar, BooleanVar, END
 from tkinter import ttk, filedialog, messagebox
-from PIL import Image, ImageTk, ImageSequence
+from PIL import Image, ImageTk, ImageSequence, ImageFile, UnidentifiedImageError
+
+# 允许加载截断的 JPEG/PNG 等, 避免部分轻微损坏导致直接失败
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 # ---------- 常量/兼容 ----------
 SUPPORTED_INPUT_EXT = ('.png', '.jpg', '.jpeg', '.webp', '.ico', '.gif')
@@ -164,6 +168,11 @@ def convert_one(input_path: str, output_file: str, target_fmt: str,
 
             img.save(output_file, format=save_format, **params)
             return True, '成功'
+    except UnidentifiedImageError:
+        return False, '无法识别/可能损坏的图片文件'
+    except OSError as e:
+        # Pillow 底层 I/O / 解码错误
+        return False, f'I/O或解码错误: {e}'
     except Exception as e:
         return False, str(e)
 
@@ -183,6 +192,7 @@ def run_cli():
     parser.add_argument('--step', type=int, default=1, help='序号步长 (pattern 有 {index} 时)')
     parser.add_argument('--overwrite-mode', choices=['overwrite', 'skip', 'rename'], default='overwrite', help='存在同名文件处理策略')
     parser.add_argument('--png3', action='store_true', help='PNG 3.0 规范: 高压缩+颜色块+APNG')
+    parser.add_argument('--workers', type=int, default=1, help='并发线程数(>1 启用多线程)')
     args = parser.parse_args()
 
     if not os.path.exists(args.input):
@@ -213,40 +223,68 @@ def run_cli():
 
     index = args.start
     converted = skipped = failed = 0
+    # 预先计算输出路径列表 (保持序号稳定)
+    task_specs = []  # (src, out_file)
     for f in files:
         src_ext = normalize_ext(f)
         if src_ext == args.format and not args.process_same:
-            skipped += 1
-            continue
-        if out_is_dir:
-            pat = args.pattern.replace('{fmt}', args.format)
-            name = pat
-            if '{index}' in pat:
-                name = name.replace('{index}', str(index))
-            name = (name
-                    .replace('{name}', os.path.splitext(os.path.basename(f))[0])
-                    .replace('{ext}', src_ext))
-            if '.' not in os.path.basename(name):
-                name += f'.{args.format}'
-            out_file = os.path.join(args.output, name)
+            task_specs.append((f, None))  # None 表示跳过
         else:
-            out_file = args.output
-
-        if os.path.exists(out_file):
-            if args.overwrite_mode == 'skip':
-                skipped += 1
-                index += args.step
-                continue
-            if args.overwrite_mode == 'rename':
-                out_file = next_non_conflict(out_file)
-
-        ok, msg = convert_one(f, out_file, args.format, ico_sizes=ico_sizes, quality=args.quality, png3=args.png3 if args.format == 'png' else False)
-        if ok:
-            converted += 1
-        else:
-            failed += 1
+            if out_is_dir:
+                pat = args.pattern.replace('{fmt}', args.format)
+                name = pat
+                if '{index}' in pat:
+                    name = name.replace('{index}', str(index))
+                name = (name
+                        .replace('{name}', os.path.splitext(os.path.basename(f))[0])
+                        .replace('{ext}', src_ext))
+                if '.' not in os.path.basename(name):
+                    name += f'.{args.format}'
+                out_file = os.path.join(args.output, name)
+            else:
+                out_file = args.output
+            if os.path.exists(out_file):
+                if args.overwrite_mode == 'skip':
+                    task_specs.append((f, None))
+                elif args.overwrite_mode == 'rename':
+                    out_file = next_non_conflict(out_file)
+                    task_specs.append((f, out_file))
+                else:
+                    task_specs.append((f, out_file))
+            else:
+                task_specs.append((f, out_file))
         index += args.step
-        print(f"{os.path.basename(f)} -> {os.path.basename(out_file)}: {msg}")
+
+    def do_task(src: str, dst: str):
+        return src, dst, convert_one(src, dst, args.format, ico_sizes=ico_sizes, quality=args.quality, png3=args.png3 if args.format=='png' else False)
+
+    if args.workers > 1:
+        workers = max(1, args.workers)
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = []
+            for src, dst in task_specs:
+                if dst is None:
+                    skipped += 1
+                    continue
+                futures.append(ex.submit(do_task, src, dst))
+            for fut in as_completed(futures):
+                src, dst, (ok, msg) = fut.result()
+                if ok:
+                    converted += 1
+                else:
+                    failed += 1
+                print(f"{os.path.basename(src)} -> {os.path.basename(dst)}: {msg}")
+    else:
+        for src, dst in task_specs:
+            if dst is None:
+                skipped += 1
+                continue
+            ok, msg = convert_one(src, dst, args.format, ico_sizes=ico_sizes, quality=args.quality, png3=args.png3 if args.format=='png' else False)
+            if ok:
+                converted += 1
+            else:
+                failed += 1
+            print(f"{os.path.basename(src)} -> {os.path.basename(dst)}: {msg}")
 
     print(f'完成：转换{converted} 跳过{skipped} 失败{failed}')
 
@@ -276,6 +314,7 @@ class ImageConverterApp:
         self.batch_start = IntVar(value=1)
         self.batch_step = IntVar(value=1)
         self.batch_overwrite = StringVar(value='overwrite')
+        self.workers_var = IntVar(value=max(2, os.cpu_count() or 4))
 
         # 队列与线程控制
         self.queue = queue.Queue()
@@ -326,7 +365,9 @@ class ImageConverterApp:
         ttk.Label(g, text='质量:').grid(row=row, column=4, sticky='e')
         ttk.Scale(g, from_=1, to=100, orient='horizontal', variable=self.quality_var).grid(row=row, column=5, sticky='we', padx=4)
         row += 1
-        ttk.Checkbutton(g, text='PNG 3.0 规范(高压缩+颜色块+APNG)', variable=self.png3_var).grid(row=row, column=0, columnspan=6, sticky='w')
+        ttk.Checkbutton(g, text='PNG 3.0 规范(高压缩+颜色块+APNG)', variable=self.png3_var).grid(row=row, column=0, columnspan=3, sticky='w')
+        ttk.Label(g, text='并发:').grid(row=row, column=3, sticky='e')
+        ttk.Spinbox(g, from_=1, to=64, textvariable=self.workers_var, width=6).grid(row=row, column=4, sticky='w')
         row += 1
         # ICO 尺寸
         self.ico_frame = ttk.LabelFrame(g, text='ICO 尺寸')
@@ -381,7 +422,9 @@ class ImageConverterApp:
         ttk.Label(g, text='质量:').grid(row=row, column=4, sticky='e')
         ttk.Scale(g, from_=1, to=100, orient='horizontal', variable=self.quality_var).grid(row=row, column=5, sticky='we', padx=4)
         row += 1
-        ttk.Checkbutton(g, text='PNG 3.0 规范(高压缩+颜色块+APNG)', variable=self.png3_var).grid(row=row, column=0, columnspan=8, sticky='w')
+        ttk.Checkbutton(g, text='PNG 3.0 规范(高压缩+颜色块+APNG)', variable=self.png3_var).grid(row=row, column=0, columnspan=5, sticky='w')
+        ttk.Label(g, text='并发:').grid(row=row, column=5, sticky='e')
+        ttk.Spinbox(g, from_=1, to=64, textvariable=self.workers_var, width=6).grid(row=row, column=6, sticky='w')
         row += 1
 
         ttk.Label(g, text='命名模式:').grid(row=row, column=0, sticky='e')
@@ -559,22 +602,46 @@ class ImageConverterApp:
                 converted = skipped = failed = 0
                 total = len(files)
                 processed = 0
+                lock = threading.Lock()
+                workers = max(1, self.workers_var.get())
+                tasks = []
                 for f in files:
-                    if self.single_stop_flag.is_set():
-                        break
                     if normalize_ext(f) == fmt and not process_same:
-                        skipped += 1
-                        ok_flag = True
+                        tasks.append((f, None))  # skip marker
                     else:
                         target = os.path.join(outp, f"{os.path.splitext(os.path.basename(f))[0]}.{fmt}")
-                        ok_flag, _ = convert_one(f, target, fmt, ico_sizes=ico_sizes, quality=quality, png3=self.png3_var.get() if fmt=='png' else False)
+                        tasks.append((f, target))
+
+                def do_one(src, dst):
+                    nonlocal converted, skipped, failed, processed
+                    if self.single_stop_flag.is_set():
+                        return
+                    if dst is None:
+                        with lock:
+                            skipped += 1
+                            processed += 1
+                            pct = int(processed/total*100)
+                            self.queue.put(f"SINGLEPROG\t{processed}\t{total}\t{pct}\t{os.path.basename(src)}")
+                        return
+                    ok_flag, _msg = convert_one(src, dst, fmt, ico_sizes=ico_sizes, quality=quality, png3=self.png3_var.get() if fmt=='png' else False)
+                    with lock:
                         if ok_flag:
                             converted += 1
                         else:
                             failed += 1
-                    processed += 1
-                    pct = int(processed / total * 100)
-                    self.queue.put(f"SINGLEPROG\t{processed}\t{total}\t{pct}\t{os.path.basename(f)}")
+                        processed += 1
+                        pct = int(processed/total*100)
+                        self.queue.put(f"SINGLEPROG\t{processed}\t{total}\t{pct}\t{os.path.basename(src)}")
+
+                if workers > 1:
+                    with ThreadPoolExecutor(max_workers=workers) as ex:
+                        futs = [ex.submit(do_one, s, d) for s, d in tasks]
+                        for _ in as_completed(futs):
+                            if self.single_stop_flag.is_set():
+                                break
+                else:
+                    for s, d in tasks:
+                        do_one(s, d)
                 if self.single_stop_flag.is_set():
                     self.queue.put("SINGLESUM\t已取消")
                 else:
@@ -649,46 +716,66 @@ class ImageConverterApp:
             converted = skipped = failed = 0
             processed_count = 0
             total_files = len(files)
+            workers = max(1, self.workers_var.get())
+            lock = threading.Lock()
+            # 预先生成任务列表，保持 index 与输出名稳定
+            task_items = []  # (src, out_file or None if skip)
             for f in files:
-                if self.stop_flag.is_set():
-                    break
                 src_ext = normalize_ext(f)
                 if src_ext == fmt and not process_same:
-                    skipped += 1
-                    self.queue.put(f"SKIP {os.path.basename(f)}")
-                    index += step
-                    processed_count += 1
-                    self.queue.put(f"PROGRESS\t{processed_count}\t{total_files}\t{os.path.basename(f)}")
-                    continue
-                name_pat = pattern.replace('{fmt}', fmt)
-                final_name = name_pat
-                if '{index}' in name_pat:
-                    final_name = final_name.replace('{index}', str(index))
-                final_name = (final_name
-                              .replace('{name}', os.path.splitext(os.path.basename(f))[0])
-                              .replace('{ext}', src_ext))
-                if '.' not in os.path.basename(final_name):
-                    final_name += f'.{fmt}'
-                out_file = os.path.join(outp, final_name)
-                if os.path.exists(out_file):
-                    if overwrite_mode == 'skip':
-                        skipped += 1
-                        self.queue.put(f"SKIP {os.path.basename(f)}")
-                        index += step
-                        processed_count += 1
-                        self.queue.put(f"PROGRESS\t{processed_count}\t{total_files}\t{os.path.basename(f)}")
-                        continue
-                    if overwrite_mode == 'rename':
-                        out_file = next_non_conflict(out_file)
-                ok, msg = convert_one(f, out_file, fmt, ico_sizes=ico_sizes, quality=quality, png3=self.png3_var.get() if fmt=='png' else False)
-                if ok:
-                    converted += 1
+                    task_items.append((f, None))
                 else:
-                    failed += 1
-                self.queue.put(f"{os.path.basename(f)} -> {os.path.basename(out_file)}: {msg}")
+                    name_pat = pattern.replace('{fmt}', fmt)
+                    final_name = name_pat
+                    if '{index}' in name_pat:
+                        final_name = final_name.replace('{index}', str(index))
+                    final_name = (final_name
+                                  .replace('{name}', os.path.splitext(os.path.basename(f))[0])
+                                  .replace('{ext}', src_ext))
+                    if '.' not in os.path.basename(final_name):
+                        final_name += f'.{fmt}'
+                    out_file = os.path.join(outp, final_name)
+                    if os.path.exists(out_file):
+                        if overwrite_mode == 'skip':
+                            task_items.append((f, None))
+                        elif overwrite_mode == 'rename':
+                            out_file = next_non_conflict(out_file)
+                            task_items.append((f, out_file))
+                        else:
+                            task_items.append((f, out_file))
+                    else:
+                        task_items.append((f, out_file))
                 index += step
-                processed_count += 1
-                self.queue.put(f"PROGRESS\t{processed_count}\t{total_files}\t{os.path.basename(f)}")
+
+            def do_job(src, dst):
+                nonlocal converted, skipped, failed, processed_count
+                if self.stop_flag.is_set():
+                    return
+                if dst is None:  # skip
+                    with lock:
+                        skipped += 1
+                        processed_count += 1
+                        self.queue.put(f"PROGRESS\t{processed_count}\t{total_files}\t{os.path.basename(src)}")
+                    return
+                ok, msg = convert_one(src, dst, fmt, ico_sizes=ico_sizes, quality=quality, png3=self.png3_var.get() if fmt=='png' else False)
+                with lock:
+                    if ok:
+                        converted += 1
+                    else:
+                        failed += 1
+                    processed_count += 1
+                    self.queue.put(f"{os.path.basename(src)} -> {os.path.basename(dst)}: {msg}")
+                    self.queue.put(f"PROGRESS\t{processed_count}\t{total_files}\t{os.path.basename(src)}")
+
+            if workers > 1:
+                with ThreadPoolExecutor(max_workers=workers) as ex:
+                    futs = [ex.submit(do_job, s, d) for s, d in task_items]
+                    for _ in as_completed(futs):
+                        if self.stop_flag.is_set():
+                            break
+            else:
+                for s, d in task_items:
+                    do_job(s, d)
             self.queue.put(f"SUMMARY 转换{converted} 跳过{skipped} 失败{failed}")
 
         self.worker = threading.Thread(target=worker, daemon=True)
