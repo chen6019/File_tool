@@ -5,7 +5,7 @@
 重命名占位: {name} {ext} {index} {fmt}
 """
 from __future__ import annotations
-import os, sys, threading, queue, shutil
+import os, sys, threading, queue, shutil, subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import List, Iterable
@@ -20,6 +20,12 @@ try:
 	from PIL import Image, ImageSequence, ImageFile, ImageTk  # type: ignore
 except Exception:  # pragma: no cover
 	Image=None  # type: ignore
+
+# Windows 回收站支持 (可选)
+try:
+	from send2trash import send2trash  # type: ignore
+except Exception:  # pragma: no cover
+	send2trash=None  # type: ignore
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True  # 更宽容
 SUPPORTED_EXT={'.jpg','.jpeg','.png','.webp','.gif','.bmp','.tiff','.ico'}
@@ -69,6 +75,19 @@ def next_non_conflict(path:str)->str:
 	while os.path.exists(path):
 		path=f"{base}_{i}{ext}"; i+=1
 	return path
+
+def safe_delete(path:str,use_trash:bool):
+	"""删除文件: Windows 且 use_trash 时尝试送回收站, 否则直接删除."""
+	if use_trash and send2trash is not None:
+		try:
+			send2trash(path)
+			return True,'删除->回收站'
+		except Exception as e:
+			return False,f'回收站失败:{e}'
+	try:
+		os.remove(path); return True,'删除'
+	except Exception as e:
+		return False,f'删失败:{e}'
 
 def ahash(im):
 	im=im.convert('L').resize((8,8))
@@ -134,22 +153,29 @@ class ImageToolApp:
 		self._tooltip=None; self._tooltip_after=None
 		self.frame_convert=None; self.frame_rename=None
 		self.move_dir_entry=None; self.move_dir_btn=None
+		self.dry_run=False
+		# 回收站 (Windows / Linux 桌面发送至废纸篓) 默认仅在 send2trash 可用时开启
+		self.use_trash=tk.BooleanVar(value=(send2trash is not None)) if tk else None
+		self.trash_cb=None
+		self.last_out_dir=None
 		self._build()
 		self.root.after(200,self._drain)
 
 	# ---------------- UI ----------------
 	def _build(self):
 		outer=ttk.Frame(self.root,padding=(8,6,8,6)); outer.pack(fill='both',expand=True)
-		# I/O
+		# I/O (支持目录或单文件)
 		io=ttk.Frame(outer); io.pack(fill='x',pady=(0,6))
-		for i in range(7): io.columnconfigure(i,weight=1 if i in (1,5) else 0)
+		for i in range(10): io.columnconfigure(i,weight=1 if i in (1,6) else 0)
 		ttk.Label(io,text='输入:').grid(row=0,column=0,sticky='e')
-		self.in_var=tk.StringVar(); ent_in=ttk.Entry(io,textvariable=self.in_var,width=38); ent_in.grid(row=0,column=1,sticky='we',padx=3)
-		btn_in=ttk.Button(io,text='选择',command=self._pick_in,width=6); btn_in.grid(row=0,column=2,padx=(0,6))
-		self.recursive_var=tk.BooleanVar(value=True); cb_rec=ttk.Checkbutton(io,text='递归',variable=self.recursive_var); cb_rec.grid(row=0,column=3,sticky='w')
-		ttk.Label(io,text='输出:').grid(row=0,column=4,sticky='e')
-		self.out_var=tk.StringVar(); ent_out=ttk.Entry(io,textvariable=self.out_var,width=32); ent_out.grid(row=0,column=5,sticky='we',padx=3)
-		btn_out=ttk.Button(io,text='选择',command=self._pick_out,width=6); btn_out.grid(row=0,column=6,padx=(2,0))
+		self.in_var=tk.StringVar(); ent_in=ttk.Entry(io,textvariable=self.in_var,width=40); ent_in.grid(row=0,column=1,sticky='we',padx=3)
+		btn_in=ttk.Button(io,text='目录',command=self._pick_in,width=5); btn_in.grid(row=0,column=2,padx=(0,3))
+		btn_in_file=ttk.Button(io,text='文件',command=self._pick_in_file,width=5); btn_in_file.grid(row=0,column=3,padx=(0,8))
+		self.recursive_var=tk.BooleanVar(value=True); cb_rec=ttk.Checkbutton(io,text='递归',variable=self.recursive_var); cb_rec.grid(row=0,column=4,sticky='w')
+		ttk.Label(io,text='输出:').grid(row=0,column=5,sticky='e')
+		self.out_var=tk.StringVar(); ent_out=ttk.Entry(io,textvariable=self.out_var,width=32); ent_out.grid(row=0,column=6,sticky='we',padx=3)
+		btn_out=ttk.Button(io,text='选择',command=self._pick_out,width=6); btn_out.grid(row=0,column=7,padx=(2,0))
+		btn_open_out=ttk.Button(io,text='打开',command=self._open_last_out,width=6); btn_open_out.grid(row=0,column=8,padx=(4,0))
 		# 功能
 		opts=ttk.Frame(outer); opts.pack(fill='x',pady=(0,8))
 		self.enable_dedupe=tk.BooleanVar(value=True)
@@ -162,6 +188,7 @@ class ImageToolApp:
 		self.workers_var=tk.IntVar(value=max(2,(os.cpu_count() or 4)//2))
 		sp_workers=ttk.Spinbox(opts,from_=1,to=64,textvariable=self.workers_var,width=5); sp_workers.pack(side='left')
 		btn_start=ttk.Button(opts,text='开始',command=self._start,width=8); btn_start.pack(side='right',padx=2)
+		btn_preview=ttk.Button(opts,text='预览',command=self._preview,width=8); btn_preview.pack(side='right',padx=2)
 		btn_cancel=ttk.Button(opts,text='取消',command=self._cancel,width=8); btn_cancel.pack(side='right',padx=2)
 		# 去重
 		ttk.Separator(outer,orient='horizontal').pack(fill='x',pady=(0,4))
@@ -170,16 +197,24 @@ class ImageToolApp:
 		self.keep_var=tk.StringVar(value=_rev_map(KEEP_MAP)['largest'])
 		self.dedup_action_var=tk.StringVar(value=_rev_map(ACTION_MAP)['list'])
 		self.move_dir_var=tk.StringVar()
-		for i in range(10): dedupe.columnconfigure(i,weight=0)
+		for i in range(11): dedupe.columnconfigure(i,weight=0)
 		ttk.Label(dedupe,text='阈值').grid(row=0,column=0,sticky='e')
 		sp_th=ttk.Spinbox(dedupe,from_=0,to=32,textvariable=self.threshold_var,width=5); sp_th.grid(row=0,column=1,sticky='w',padx=(0,8))
 		ttk.Label(dedupe,text='保留').grid(row=0,column=2,sticky='e')
 		cb_keep=ttk.Combobox(dedupe,textvariable=self.keep_var,values=list(KEEP_MAP.keys()),width=12,state='readonly'); cb_keep.grid(row=0,column=3,sticky='w',padx=(0,8))
 		ttk.Label(dedupe,text='动作').grid(row=0,column=4,sticky='e')
 		cb_action=ttk.Combobox(dedupe,textvariable=self.dedup_action_var,values=list(ACTION_MAP.keys()),width=10,state='readonly'); cb_action.grid(row=0,column=5,sticky='w',padx=(0,8))
-		ttk.Label(dedupe,text='移动到').grid(row=0,column=6,sticky='e')
-		self.move_dir_entry=ttk.Entry(dedupe,textvariable=self.move_dir_var,width=28); self.move_dir_entry.grid(row=0,column=7,sticky='w')
-		self.move_dir_btn=ttk.Button(dedupe,text='选',command=self._pick_move_dir,width=4); self.move_dir_btn.grid(row=0,column=8,sticky='w',padx=(4,0))
+		if self.use_trash is not None:
+			self.trash_cb=ttk.Checkbutton(dedupe,text='回收站',variable=self.use_trash)
+			self.trash_cb.grid(row=0,column=6,sticky='w',padx=(0,6))
+			if send2trash is None:
+				self.trash_cb.state(['disabled'])
+				self.trash_cb.configure(text='回收站(缺依赖)')
+				self.root.after(100, lambda: self.status_var.set('缺少 send2trash, 运行: pip install send2trash'))
+		col_mv=7 if self.trash_cb else 6
+		ttk.Label(dedupe,text='移动到').grid(row=0,column=col_mv,sticky='e')
+		self.move_dir_entry=ttk.Entry(dedupe,textvariable=self.move_dir_var,width=24); self.move_dir_entry.grid(row=0,column=col_mv+1,sticky='w')
+		self.move_dir_btn=ttk.Button(dedupe,text='选',command=self._pick_move_dir,width=4); self.move_dir_btn.grid(row=0,column=col_mv+2,sticky='w',padx=(4,0))
 		# 转换
 		ttk.Separator(outer,orient='horizontal').pack(fill='x',pady=(0,4))
 		convert=ttk.LabelFrame(outer,text='格式转换'); convert.pack(fill='x',pady=(0,10))
@@ -242,11 +277,12 @@ class ImageToolApp:
 		self.dedup_action_var.trace_add('write', lambda *a: self._update_states())
 		# tooltips
 		tips=[
-			(ent_in,'输入目录 (支持常见图片)'),(btn_in,'选择输入目录'),(cb_rec,'是否递归子目录'),
-			(ent_out,'输出目录 (留空=输入目录)'),(btn_out,'选择输出目录'),
+			(ent_in,'输入目录/文件 (支持常见图片)'),(btn_in,'选择输入目录'),(btn_in_file,'选择单个图片文件'),(cb_rec,'是否递归子目录 (单文件时忽略)'),
+			(ent_out,'输出目录 (留空=跟随输入目录或文件所在目录)'),(btn_out,'选择输出目录'),(btn_open_out,'打开输出目录'),
 			(cb_dedupe,'勾选执行重复检测'),(cb_convert,'勾选执行格式转换'),(cb_rename,'勾选执行重命名'),
-			(sp_workers,'并行线程数'),(btn_start,'开始执行'),(btn_cancel,'取消执行'),
-			(sp_th,'相似阈值 0：严格 >0：近似'),(cb_keep,'重复组保留策略'),(cb_action,'重复文件动作'),
+			(sp_workers,'并行线程数'),(btn_start,'真实执行'),(btn_preview,'仅预览不写入'),(btn_cancel,'取消执行'),
+			(sp_th,'相似阈值 0：严格 |  >0：近似'),(cb_keep,'重复组保留策略'),(cb_action,'重复文件动作'),
+			*( [(self.trash_cb,'仅删除重复时可用 (send2trash)')] if self.trash_cb else [] ),
 			(self.move_dir_entry,'重复文件移动目标'),(self.move_dir_btn,'选择移动目录'),
 			(cb_fmt,'目标格式'),(sc_q,'拖动调整质量'),(sp_q,'直接输入质量 1-100'),(cb_same,'同格式也重新编码'),(cb_png3,'PNG 高压缩'),
 			(ent_pattern,'重命名模式: {name}{ext}{index}{fmt}'),(sp_start,'序号起始'),(sp_step,'序号步长'),(cb_over,'覆盖策略')
@@ -258,6 +294,9 @@ class ImageToolApp:
 	def _pick_in(self):
 		d=filedialog.askdirectory();
 		if d: self.in_var.set(d)
+	def _pick_in_file(self):
+		f=filedialog.askopenfilename(filetypes=[('图片','*.jpg;*.jpeg;*.png;*.webp;*.gif;*.bmp;*.tiff;*.ico')])
+		if f: self.in_var.set(f)
 	def _pick_out(self):
 		d=filedialog.askdirectory();
 		if d: self.out_var.set(d)
@@ -265,22 +304,57 @@ class ImageToolApp:
 		d=filedialog.askdirectory();
 		if d: self.move_dir_var.set(d)
 
-	def _start(self):
+	def _start(self, dry_run:bool=False):
 		if self.worker and self.worker.is_alive():
 			messagebox.showinfo('提示','任务运行中'); return
-		root_dir=self.in_var.get().strip(); out_dir=self.out_var.get().strip() or root_dir
-		if not root_dir or not os.path.isdir(root_dir): self.status_var.set('输入目录无效'); return
-		os.makedirs(out_dir,exist_ok=True)
-		self._all_files=[p for p in iter_images(root_dir,self.recursive_var.get())]
+		self.dry_run=dry_run
+		inp=self.in_var.get().strip()
+		if not inp: self.status_var.set('未选择输入'); return
+		if os.path.isdir(inp):
+			root_dir=inp
+			out_dir=self.out_var.get().strip() or root_dir
+			os.makedirs(out_dir,exist_ok=True)
+			self._all_files=[p for p in iter_images(root_dir,self.recursive_var.get())]
+		elif os.path.isfile(inp):
+			# 单文件
+			root_dir=os.path.dirname(inp) or os.getcwd()
+			out_dir=self.out_var.get().strip() or root_dir
+			os.makedirs(out_dir,exist_ok=True)
+			self._all_files=[inp]
+		else:
+			self.status_var.set('输入不存在'); return
 		if not self._all_files: self.status_var.set('无图片'); return
 		for i in self.log.get_children(): self.log.delete(i)
 		self.progress['value']=0; self.progress['maximum']=len(self._all_files)
 		self.status_var.set('开始...')
-		self.stop_flag.clear()
+		self.stop_flag.clear(); self.last_out_dir=out_dir
 		self.worker=threading.Thread(target=self._pipeline,daemon=True); self.worker.start()
 
 	def _cancel(self):
 		self.stop_flag.set(); self.status_var.set('请求取消...')
+
+	def _open_last_out(self):
+		path=self.last_out_dir or self.out_var.get().strip()
+		if not path:
+			self.status_var.set('无输出目录'); return
+		if not os.path.isdir(path):
+			self.status_var.set('目录不存在'); return
+		try:
+			if sys.platform.startswith('win'):
+				os.startfile(path)  # type: ignore
+			elif sys.platform=='darwin':
+				subprocess.Popen(['open', path])
+			else:
+				subprocess.Popen(['xdg-open', path])
+			self.status_var.set('已打开输出目录')
+		except Exception as e:
+			self.status_var.set(f'打开失败:{e}')
+
+	def _preview(self):
+		if self.worker and self.worker.is_alive():
+			messagebox.showinfo('提示','任务运行中'); return
+		self._start(dry_run=True)
+		self.status_var.set('预览模式 (不修改文件)')
 
 	# 管线
 	def _pipeline(self):
@@ -291,9 +365,12 @@ class ImageToolApp:
 				if self.stop_flag.is_set(): return
 			if self.enable_convert.get() or self.enable_rename.get():
 				self._convert_rename_stage(kept)
-			self.q.put('STATUS 完成')
+			self.q.put('STATUS 预览完成' if self.dry_run else 'STATUS 完成')
 		except Exception as e:
 			self.q.put(f'STATUS 失败: {e}')
+		finally:
+			# 执行后重置 dry_run
+			self.dry_run=False
 
 	# 去重
 	def _dedupe_stage(self, files:List[str])->List[str]:
@@ -343,15 +420,22 @@ class ImageToolApp:
 			for o in (x for x in g if x is not keep):
 				act='保留'
 				if action=='delete' and not self.stop_flag.is_set():
-					try: os.remove(o.path); act='删除'
-					except Exception as e: act=f'删失败:{e}'
+					if self.dry_run:
+						act='删除(预览)'
+					else:
+						use_trash = bool(self.use_trash.get()) if self.use_trash is not None else False
+						ok,msg = safe_delete(o.path,use_trash)
+						act=msg if ok else msg
 				elif action=='move' and move_dir and not self.stop_flag.is_set():
-					try:
-						os.makedirs(move_dir,exist_ok=True)
-						target=os.path.join(move_dir,os.path.basename(o.path))
-						if os.path.exists(target): target=next_non_conflict(target)
-						shutil.move(o.path,target); act='移动'
-					except Exception as e: act=f'移失败:{e}'
+					if self.dry_run:
+						act='移动(预览)'
+					else:
+						try:
+							os.makedirs(move_dir,exist_ok=True)
+							target=os.path.join(move_dir,os.path.basename(o.path))
+							if os.path.exists(target): target=next_non_conflict(target)
+							shutil.move(o.path,target); act='移动'
+						except Exception as e: act=f'移失败:{e}'
 				self.q.put(f'LOG\tDEDUP\t{o.path}\t{keep.path}\t{act}')
 			self.q.put(f'LOG\tDEDUP\t{keep.path}\t组#{gi}\t保留({len(g)})')
 		dup_paths={x.path for grp in dup for x in grp}
@@ -381,7 +465,7 @@ class ImageToolApp:
 				if overwrite=='skip':
 					self.q.put(f'LOG\tCONVERT\t{f}\t{dst}\t跳过(存在)'); idx+=step; continue
 				elif overwrite=='rename':
-					dst=next_non_conflict(dst)
+					dst=next_non_conflict(dst) if not self.dry_run else dst+"(预览改名)"
 			tasks.append((f,dst,need_convert,tgt_fmt)); idx+=step
 		total=len(tasks); self.q.put(f'STATUS 转换/重命名 共{total}')
 		done=0; lock=threading.Lock()
@@ -389,15 +473,23 @@ class ImageToolApp:
 			nonlocal done
 			src,dst,need_convert,tgt=spec
 			if self.stop_flag.is_set(): return
-			os.makedirs(os.path.dirname(dst),exist_ok=True)
+			if not self.dry_run:
+				os.makedirs(os.path.dirname(dst),exist_ok=True)
 			if need_convert:
-				ok,msg=convert_one(src,dst,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False,None if tgt!='ico' else [16,32,48,64,128,256])
+				if self.dry_run:
+					ok=True; msg='转换(预览)'
+				else:
+					ok,msg=convert_one(src,dst,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False,None if tgt!='ico' else [16,32,48,64,128,256])
 			else:
-				try:
-					if os.path.abspath(src)==os.path.abspath(dst): ok=True; msg='保持'
-					else: shutil.copy2(src,dst); ok=True; msg='复制'
-				except Exception as e:
-					ok=False; msg=f'复制失败:{e}'
+				if self.dry_run:
+					if os.path.abspath(src)==os.path.abspath(dst): ok=True; msg='保持(预览)'
+					else: ok=True; msg='复制(预览)'
+				else:
+					try:
+						if os.path.abspath(src)==os.path.abspath(dst): ok=True; msg='保持'
+						else: shutil.copy2(src,dst); ok=True; msg='复制'
+					except Exception as e:
+						ok=False; msg=f'复制失败:{e}'
 			with lock:
 				done+=1
 				stage='CONVERT' if need_convert else 'RENAME'
@@ -477,11 +569,21 @@ class ImageToolApp:
 				except Exception:
 					pass
 		need_move=ACTION_MAP.get(self.dedup_action_var.get(),'list')=='move'
+		need_delete=ACTION_MAP.get(self.dedup_action_var.get(),'list')=='delete'
 		mv_st='normal' if need_move else 'disabled'
 		if self.move_dir_entry: \
 			self.move_dir_entry.configure(state=mv_st)
 		if self.move_dir_btn: \
 			self.move_dir_btn.configure(state=mv_st)
+		# 回收站复选框 (仅删除时可用)
+		if self.trash_cb is not None:
+			if send2trash is None:
+				self.trash_cb.state(['disabled'])
+			else:
+				if need_delete:
+					self.trash_cb.state(['!disabled'])
+				else:
+					self.trash_cb.state(['disabled'])
 
 	# Tooltips
 	def _show_tooltip(self,text,x,y):
