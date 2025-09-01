@@ -341,7 +341,11 @@ class ImageToolApp:
 		self.log_filter_kw.trace_add('write', self._on_change_log_filter)
 		self.log_filter_fail.trace_add('write', self._on_change_log_filter)
 		pan=ttk.PanedWindow(outer,orient='vertical'); pan.pack(fill='both',expand=True)
-		upper=ttk.Frame(pan); lower=ttk.Frame(pan); pan.add(upper,weight=3); pan.add(lower,weight=2)
+		self.paned=pan  # 保存引用用于自动调整
+		upper=ttk.Frame(pan); lower=ttk.Frame(pan)
+		self.upper_frame=upper; self.lower_frame=lower
+		pan.add(upper,weight=0)
+		pan.add(lower,weight=1)
 		upper.columnconfigure(0,weight=1); upper.rowconfigure(0,weight=1)
 		cols=[('stage','阶段',70),('src','源',260),('dst','目标/组',260),('info','信息',200)]
 		self.log=ttk.Treeview(upper,columns=[c[0] for c in cols],show='headings',height=12)
@@ -377,6 +381,12 @@ class ImageToolApp:
 		# 兼容旧属性引用
 		self.preview_label=self.preview_after_label
 		self.preview_info=self.preview_after_info
+		# 自动调整窗口大小选项
+		self.auto_resize_window=tk.BooleanVar(value=False)
+		cb_auto=ttk.Checkbutton(prev,text='随图自调',variable=self.auto_resize_window)
+		cb_auto.grid(row=2,column=0,sticky='w',pady=(2,0))
+		self._last_auto_size=None
+		self.auto_resize_window.trace_add('write', lambda *a: self._maybe_resize_window())
 		# 事件
 		self.log.bind('<<TreeviewSelect>>', self._on_select_row)
 		self.log.bind('<Motion>', self._on_log_motion)
@@ -407,10 +417,22 @@ class ImageToolApp:
 			(ent_pattern,'重命名模式: {name}{ext}{index}{fmt}'),(sp_start,'序号起始'),(sp_step,'序号步长'),(cb_over,'覆盖策略'),(cb_rm_src,'删除源文件(移动而不是复制)')
 		]
 		tips.extend(more_tips)
+		# 补充自动调整窗口提示
+		if 'cb_auto' in locals():
+			try: tips.append((cb_auto,'根据预览图片尺寸自动调整窗口大小'))
+			except Exception: pass
 		for w,t in tips: self._bind_tip(w,t)
 		self._update_states()
 		# 原始日志缓存 (用于筛选)
 		self._raw_logs=[]  # list of tuples (stage, src_full, dst_full, info, display_values, tags)
+		# 记录基础窗口最小尺寸
+		try:
+			self.root.update_idletasks(); self._base_win_width=self.root.winfo_width(); self._base_win_height=self.root.winfo_height()
+		except Exception:
+			self._base_win_width=900; self._base_win_height=600
+		# 捕获日志区初始高度用于锁定
+		self._log_fixed_height=None
+		self.root.after(400,self._capture_log_height)
 
 	# 事件
 	def _pick_in(self):
@@ -836,7 +858,7 @@ class ImageToolApp:
 		# 加载函数
 		def load_to(label,info_var,path,placeholder):
 			if not path:
-				label.configure(text=placeholder,image=''); info_var.set(''); return
+				label.configure(text=placeholder,image=''); info_var.set(''); return (0,0)
 			try:
 				with Image.open(path) as im:  # type: ignore
 					w,h=im.size; max_side=420; scale=min(max_side/w,max_side/h,1)
@@ -844,10 +866,59 @@ class ImageToolApp:
 					photo=ImageTk.PhotoImage(im)
 				label.configure(image=photo,text=''); label._img_ref=photo  # 保持引用
 				info_var.set(f'{w}x{h} {os.path.basename(path)}')
+				return photo.width(), photo.height()
 			except Exception as e:
-				label.configure(text=f'预览失败:{e}',image=''); info_var.set('')
-		load_to(self.preview_before_label,self.preview_before_info,src_path,'(无源)')
-		load_to(self.preview_after_label,self.preview_after_info,result_path,'(无结果)')
+				label.configure(text=f'预览失败:{e}',image=''); info_var.set(''); return (0,0)
+		bw,bh=load_to(self.preview_before_label,self.preview_before_info,src_path,'(无源)')
+		aw,ah=load_to(self.preview_after_label,self.preview_after_info,result_path,'(无结果)')
+		self._maybe_resize_window()
+
+	def _maybe_resize_window(self):
+		if not getattr(self,'auto_resize_window',None): return
+		if not self.auto_resize_window.get(): return
+		self.root.update_idletasks()
+		photo_b=getattr(self.preview_before_label,'_img_ref',None)
+		photo_a=getattr(self.preview_after_label,'_img_ref',None)
+		bw = photo_b.width() if photo_b else 0
+		bh = photo_b.height() if photo_b else 0
+		aw = photo_a.width() if photo_a else 0
+		ah = photo_a.height() if photo_a else 0
+		if (bw==0 and aw==0):
+			return
+		# 只调整高度: 计算需要的总高度
+		root_y0=self.root.winfo_rooty()
+		preview_top = self.preview_before_label.winfo_rooty()-root_y0
+		img_h=max(bh,ah)
+		extra_h=110  # info 行 + 边距
+		desired_h=preview_top+img_h+extra_h
+		sh=self.root.winfo_screenheight(); margin=50
+		desired_h=min(desired_h, sh-margin)
+		cur_w=self.root.winfo_width()  # 保持当前宽度
+		last=self._last_auto_size
+		# last[0] 存旧宽度, last[1] 旧高度
+		if not (last and abs(last[1]-desired_h)<10):
+			self.root.geometry(f"{int(cur_w)}x{int(desired_h)}")
+			self._last_auto_size=(cur_w,desired_h)
+		# 固定日志区高度
+		if self._log_fixed_height and hasattr(self,'paned') and hasattr(self,'upper_frame'):
+			try:
+				self.paned.paneconfigure(self.upper_frame,minsize=self._log_fixed_height)
+			except Exception:
+				pass
+		# 调整分隔条, 让预览能完全显示
+		# 不再强制设置 sash，以允许用户手动调整日志 / 预览比例
+
+	def _capture_log_height(self):
+		try:
+			if hasattr(self,'upper_frame') and self._log_fixed_height is None:
+				self.root.update_idletasks()
+				h=self.upper_frame.winfo_height()
+				if h>60:
+					self._log_fixed_height=h
+					if hasattr(self,'paned'):
+						self.paned.paneconfigure(self.upper_frame,minsize=h)
+		except Exception:
+			pass
 
 	def _log_row_visible(self,stage:str,info:str,vals:tuple)->bool:
 		stage_map={'DEDUP':'去重','CONVERT':'转换','RENAME':'重命名'}
