@@ -120,9 +120,23 @@ def dhash(im):
 def hamming(a:int,b:int)->int:
 	return (a^b).bit_count()
 
-def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None):
+def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=None):
 	try:
 		with Image.open(src) as im:  # type: ignore
+			if fmt=='ico':
+				w,h=im.size
+				if w!=h and square_mode and square_mode!='keep':
+					if square_mode=='center':
+						side=min(w,h); left=(w-side)//2; top=(h-side)//2
+						im=im.crop((left,top,left+side,top+side))
+					elif square_mode=='topleft':
+						side=min(w,h); im=im.crop((0,0,side,side))
+					elif square_mode=='fit':  # 填充
+						side=max(w,h)
+						canvas=Image.new('RGBA',(side,side),(0,0,0,0))
+						x=(side-w)//2; y=(side-h)//2
+						canvas.paste(im,(x,y))
+						im=canvas
 			if fmt=='gif':
 				im.save(dst,save_all=True)
 			elif fmt=='ico':
@@ -241,6 +255,7 @@ class ImageToolApp:
 		self.ico_sizes_var=tk.StringVar(value='')  # 自定义尺寸输入
 		self.ico_keep_orig=tk.BooleanVar(value=False)
 		self.ico_size_vars={s:tk.BooleanVar(value=(s in (16,32,48,64))) for s in (16,32,48,64,128,256)}
+		self.ico_square_mode=tk.StringVar(value='fit')  # keep|center|topleft|fit
 		ttk.Label(convert,text='格式').grid(row=0,column=0,sticky='e')
 		cb_fmt=ttk.Combobox(convert,textvariable=self.fmt_var,values=list(FMT_MAP.keys()),width=12,state='readonly'); cb_fmt.grid(row=0,column=1,sticky='w',padx=(0,12))
 		ttk.Label(convert,text='质量').grid(row=0,column=2,sticky='e')
@@ -257,6 +272,18 @@ class ImageToolApp:
 		# 复选框区域
 		ico_box=ttk.Frame(convert)
 		ico_box.grid(row=1,column=2,columnspan=5,sticky='w',pady=(4,0))
+		# 非方图处理方式
+		frame_sq=ttk.Frame(convert)
+		frame_sq.grid(row=2,column=0,columnspan=8,sticky='w',pady=(2,2))
+		ttk.Label(frame_sq,text='非方图:').pack(side='left')
+		sq_choices=[('保持','keep'),('中心裁切','center'),('左上裁切','topleft'),('等比例填充','fit')]
+		for txt,val in sq_choices:
+			ttk.Radiobutton(frame_sq,text=txt,variable=self.ico_square_mode,value=val).pack(side='left',padx=(4,0))
+		self.ico_square_warn=tk.StringVar(value='')
+		lbl_warn=ttk.Label(frame_sq,textvariable=self.ico_square_warn,foreground='orange')
+		lbl_warn.pack(side='left',padx=(10,0))
+		# 保存引用以便根据是否为 ICO 格式启用/禁用
+		self.frame_sq=frame_sq
 		self.ico_checks=[]
 		for i,s in enumerate((16,32,48,64,128,256)):
 			cb=ttk.Checkbutton(ico_box,text=str(s),variable=self.ico_size_vars[s])
@@ -334,10 +361,22 @@ class ImageToolApp:
 		hsb=ttk.Scrollbar(upper,orient='horizontal',command=self.log.xview); hsb.grid(row=1,column=0,sticky='we')
 		self.log.configure(yscrollcommand=vsb.set,xscrollcommand=hsb.set)
 		lower.columnconfigure(0,weight=1); lower.rowconfigure(0,weight=1)
-		prev=ttk.LabelFrame(lower,text='预览'); prev.pack(fill='both',expand=True)
-		prev.columnconfigure(0,weight=1); prev.rowconfigure(0,weight=1)
-		self.preview_label=ttk.Label(prev,text='(选择日志行)'); self.preview_label.grid(row=0,column=0,sticky='nsew',padx=4,pady=4)
-		self.preview_info=tk.StringVar(value=''); ttk.Label(prev,textvariable=self.preview_info,foreground='gray').grid(row=1,column=0,sticky='we')
+		prev=ttk.LabelFrame(lower,text='预览 (前后对比)'); prev.pack(fill='both',expand=True)
+		for i in range(2): prev.columnconfigure(i,weight=1)
+		prev.rowconfigure(0,weight=1)
+		# BEFORE
+		before_frame=ttk.Frame(prev,padding=2); before_frame.grid(row=0,column=0,sticky='nsew')
+		before_frame.columnconfigure(0,weight=1); before_frame.rowconfigure(0,weight=1)
+		self.preview_before_label=ttk.Label(before_frame,text='(源)'); self.preview_before_label.grid(row=0,column=0,sticky='nsew')
+		self.preview_before_info=tk.StringVar(value=''); ttk.Label(before_frame,textvariable=self.preview_before_info,foreground='gray').grid(row=1,column=0,sticky='we')
+		# AFTER
+		after_frame=ttk.Frame(prev,padding=2); after_frame.grid(row=0,column=1,sticky='nsew')
+		after_frame.columnconfigure(0,weight=1); after_frame.rowconfigure(0,weight=1)
+		self.preview_after_label=ttk.Label(after_frame,text='(结果)'); self.preview_after_label.grid(row=0,column=0,sticky='nsew')
+		self.preview_after_info=tk.StringVar(value=''); ttk.Label(after_frame,textvariable=self.preview_after_info,foreground='gray').grid(row=1,column=0,sticky='we')
+		# 兼容旧属性引用
+		self.preview_label=self.preview_after_label
+		self.preview_info=self.preview_after_info
 		# 事件
 		self.log.bind('<<TreeviewSelect>>', self._on_select_row)
 		self.log.bind('<Motion>', self._on_log_motion)
@@ -364,6 +403,7 @@ class ImageToolApp:
 		# 继续追加其余
 		more_tips=[
 			(self.ico_keep_cb,'仅输出原图尺寸 (忽略其它选择)'),
+			(frame_sq,'非方图处理策略 (仅 ICO 格式时有效)'),
 			(ent_pattern,'重命名模式: {name}{ext}{index}{fmt}'),(sp_start,'序号起始'),(sp_step,'序号步长'),(cb_over,'覆盖策略'),(cb_rm_src,'删除源文件(移动而不是复制)')
 		]
 		tips.extend(more_tips)
@@ -579,6 +619,17 @@ class ImageToolApp:
 		out_dir=self.out_var.get().strip() or self.in_var.get().strip()
 		workers=max(1,self.workers_var.get())
 		tasks=[]; idx=start
+		# 如果目标是 ico 并且存在非方图，预先统计给予提示（仅一次）
+		if fmt=='ico':
+			warn_needed=False
+			for f in files[:50]:  # 采样前50避免过慢
+				try:
+					with Image.open(f) as im:
+						if im.size[0]!=im.size[1]:
+							warn_needed=True; break
+				except Exception: pass
+			if warn_needed and self.ico_square_mode.get()=='keep':
+				self.q.put('STATUS 检测到非方图, ICO 可能被拉伸, 可选择裁切/填充方式')
 		for f in files:
 			src_ext=norm_ext(f)
 			tgt_fmt=fmt if self.enable_convert.get() else src_ext
@@ -641,10 +692,10 @@ class ImageToolApp:
 			if need_convert:
 				if self.dry_run:
 					# 实际执行一次到缓存，保证可预览
-					ok_convert,msg_convert=convert_one(src,convert_path,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False, ico_sizes if tgt=='ico' else None)
+					ok_convert,msg_convert=convert_one(src,convert_path,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False, ico_sizes if tgt=='ico' else None, self.ico_square_mode_code() if tgt=='ico' else None)
 					msg_convert = ('转换(预览)' if ok_convert else '转换失败(预览)')
 				else:
-					ok_convert,msg_convert=convert_one(src,convert_path,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False, ico_sizes if tgt=='ico' else None)
+					ok_convert,msg_convert=convert_one(src,convert_path,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False, ico_sizes if tgt=='ico' else None, self.ico_square_mode_code() if tgt=='ico' else None)
 					if ok_convert and remove_src_on_convert:
 						use_trash = bool(self.use_trash.get()) if self.use_trash is not None else False
 						ok_del, msg_del = safe_delete(src, use_trash)
@@ -761,45 +812,42 @@ class ImageToolApp:
 		tags = self.log.item(sel[0],'tags') or []  # (src_full, dst_full, stage_tag)
 		src_full = tags[0] if len(tags)>=1 else ''
 		dst_full_logged = tags[1] if len(tags)>=2 else ''
-		# 判断应该显示哪个目标：
-		# 对于去重阶段：
-		#   - 行格式1: 重复文件 -> 保留文件 (dst=保留原图) 预览应显示保留文件(即 dst_full_logged)
-		#   - 行格式2: 保留文件 -> 组#X  预览显示保留文件
-		# 对于转换/重命名阶段：显示转换后/重命名后的 dst
-		# 预览模式使用缓存映射
+		# 源与结果路径推断
 		if self.dry_run:
-			cache_dst = os.path.join(self.cache_dir, dst_basename)
-			candidate_paths = [cache_dst]
-			# 对于 dedupe 组# 行，dst_basename 不是文件名，改用 src_full (保留)
-			if not os.path.splitext(dst_basename)[1]:  # 没有扩展名，可能是 组#
-				candidate_paths.insert(0, os.path.join(self.cache_dir, os.path.basename(src_full)))
+			# 缓存中的结果
+			dst_candidates=[os.path.join(self.cache_dir,dst_basename)]
+			if not os.path.splitext(dst_basename)[1]: # 去重组行
+				dst_candidates.insert(0, os.path.join(self.cache_dir, os.path.basename(src_full)))
 		else:
 			out_dir = self.out_var.get().strip() or self.in_var.get().strip()
-			candidate_paths = []
-			# 如果 dst_full_logged 是实际路径且存在则优先
-			if dst_full_logged and os.path.isfile(dst_full_logged):
-				candidate_paths.append(dst_full_logged)
-			# 常规推导
-			candidate_paths.append(os.path.join(out_dir, dst_basename))
-			# 对于去重保留行
-			if not os.path.splitext(dst_basename)[1]:  # 组#
-				candidate_paths.append(src_full)
-		# 选择第一个存在的
-		path=None
-		for p in candidate_paths:
-			if p and os.path.exists(p):
-				path=p; break
-		if path is None:
-			self.preview_label.configure(text='文件不存在',image=''); return
-		try:
-			with Image.open(path) as im:  # type: ignore
-				w,h=im.size; max_side=420; scale=min(max_side/w,max_side/h,1)
-				if scale<1: im=im.resize((int(w*scale),int(h*scale)))
-				photo=ImageTk.PhotoImage(im)
-			self.preview_label.configure(image=photo,text=''); self._preview_ref=photo
-			self.preview_info.set(f'{w}x{h} {os.path.basename(path)}')
-		except Exception as e:
-			self.preview_label.configure(text=f'预览失败:{e}',image='')
+			dst_candidates=[]
+			if dst_full_logged and os.path.isfile(dst_full_logged): dst_candidates.append(dst_full_logged)
+			dst_candidates.append(os.path.join(out_dir,dst_basename))
+			if not os.path.splitext(dst_basename)[1]: dst_candidates.append(src_full)
+		# 源候选
+		src_candidates=[src_full]
+		# 取存在的源与结果
+		def first_exist(lst):
+			for p in lst:
+				if p and os.path.exists(p): return p
+			return None
+		src_path=first_exist(src_candidates)
+		result_path=first_exist(dst_candidates)
+		# 加载函数
+		def load_to(label,info_var,path,placeholder):
+			if not path:
+				label.configure(text=placeholder,image=''); info_var.set(''); return
+			try:
+				with Image.open(path) as im:  # type: ignore
+					w,h=im.size; max_side=420; scale=min(max_side/w,max_side/h,1)
+					if scale<1: im=im.resize((int(w*scale),int(h*scale)))
+					photo=ImageTk.PhotoImage(im)
+				label.configure(image=photo,text=''); label._img_ref=photo  # 保持引用
+				info_var.set(f'{w}x{h} {os.path.basename(path)}')
+			except Exception as e:
+				label.configure(text=f'预览失败:{e}',image=''); info_var.set('')
+		load_to(self.preview_before_label,self.preview_before_info,src_path,'(无源)')
+		load_to(self.preview_after_label,self.preview_after_info,result_path,'(无结果)')
 
 	def _log_row_visible(self,stage:str,info:str,vals:tuple)->bool:
 		stage_map={'DEDUP':'去重','CONVERT':'转换','RENAME':'重命名'}
@@ -828,6 +876,9 @@ class ImageToolApp:
 		for stage,src,dst,info,vals,tags in self._raw_logs:
 			if self._log_row_visible(stage,info,vals):
 				self.log.insert('', 'end', values=vals, tags=tags)
+
+	def ico_square_mode_code(self):
+		return self.ico_square_mode.get() if hasattr(self,'ico_square_mode') else 'keep'
 
 	def _reset_log_filter(self):
 		if hasattr(self,'log_filter_stage'): self.log_filter_stage.set('全部')
@@ -866,6 +917,11 @@ class ImageToolApp:
 				if hasattr(self,'ico_keep_cb'): self.ico_keep_cb.configure(state=state)
 				if hasattr(self,'ico_checks'):
 					for cb in self.ico_checks: cb.configure(state=state)
+				# 非方图策略行
+				if hasattr(self,'frame_sq'):
+					for ch in self.frame_sq.winfo_children():
+						try: ch.configure(state=state)
+						except Exception: pass
 			except Exception:
 				pass
 		if self.frame_rename:
