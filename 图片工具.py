@@ -55,6 +55,13 @@ OVERWRITE_MAP={
 	'自动改名':'rename',
 }
 
+# 日志阶段到中文显示
+STAGE_MAP_DISPLAY={
+	'DEDUP':'去重',
+	'CONVERT':'转换',
+	'RENAME':'重命名',
+}
+
 def _rev_map(mp:dict):
 	return {v:k for k,v in mp.items()}
 
@@ -193,6 +200,7 @@ class ImageToolApp:
 		# 去重
 		ttk.Separator(outer,orient='horizontal').pack(fill='x',pady=(0,4))
 		dedupe=ttk.LabelFrame(outer,text='去重设置'); dedupe.pack(fill='x',pady=(0,10))
+		self.frame_dedupe=dedupe
 		self.threshold_var=tk.IntVar(value=0)
 		self.keep_var=tk.StringVar(value=_rev_map(KEEP_MAP)['largest'])
 		self.dedup_action_var=tk.StringVar(value=_rev_map(ACTION_MAP)['list'])
@@ -239,6 +247,7 @@ class ImageToolApp:
 		self.start_var=tk.IntVar(value=1)
 		self.step_var=tk.IntVar(value=1)
 		self.overwrite_var=tk.StringVar(value=_rev_map(OVERWRITE_MAP)['overwrite'])
+		self.rename_remove_src=tk.BooleanVar(value=False)
 		ttk.Label(rename,text='模式').grid(row=0,column=0,sticky='e')
 		ent_pattern=ttk.Entry(rename,textvariable=self.pattern_var,width=42); ent_pattern.grid(row=0,column=1,sticky='w',padx=(0,8))
 		ttk.Label(rename,text='起始').grid(row=0,column=2,sticky='e')
@@ -247,7 +256,9 @@ class ImageToolApp:
 		sp_step=ttk.Spinbox(rename,from_=1,to=9999,textvariable=self.step_var,width=5); sp_step.grid(row=0,column=5,sticky='w')
 		ttk.Label(rename,text='覆盖策略').grid(row=0,column=6,sticky='e')
 		cb_over=ttk.Combobox(rename,textvariable=self.overwrite_var,values=list(OVERWRITE_MAP.keys()),width=12,state='readonly'); cb_over.grid(row=0,column=7,sticky='w')
-		for i in range(8): rename.columnconfigure(i,weight=0)
+		cb_rm_src=ttk.Checkbutton(rename,text='删源',variable=self.rename_remove_src)
+		cb_rm_src.grid(row=0,column=8,sticky='w',padx=(8,0))
+		for i in range(9): rename.columnconfigure(i,weight=0)
 		# 进度
 		ttk.Separator(outer,orient='horizontal').pack(fill='x',pady=(0,6))
 		self.progress=ttk.Progressbar(outer,maximum=100); self.progress.pack(fill='x',pady=(0,4))
@@ -274,6 +285,7 @@ class ImageToolApp:
 		self.log.bind('<Motion>', self._on_log_motion)
 		self.enable_convert.trace_add('write', lambda *a: self._update_states())
 		self.enable_rename.trace_add('write', lambda *a: self._update_states())
+		self.enable_dedupe.trace_add('write', lambda *a: self._update_states())
 		self.dedup_action_var.trace_add('write', lambda *a: self._update_states())
 		# tooltips
 		tips=[
@@ -285,7 +297,7 @@ class ImageToolApp:
 			*( [(self.trash_cb,'仅删除重复时可用 (send2trash)')] if self.trash_cb else [] ),
 			(self.move_dir_entry,'重复文件移动目标'),(self.move_dir_btn,'选择移动目录'),
 			(cb_fmt,'目标格式'),(sc_q,'拖动调整质量'),(sp_q,'直接输入质量 1-100'),(cb_same,'同格式也重新编码'),(cb_png3,'PNG 高压缩'),
-			(ent_pattern,'重命名模式: {name}{ext}{index}{fmt}'),(sp_start,'序号起始'),(sp_step,'序号步长'),(cb_over,'覆盖策略')
+			(ent_pattern,'重命名模式: {name}{ext}{index}{fmt}'),(sp_start,'序号起始'),(sp_step,'序号步长'),(cb_over,'覆盖策略'),(cb_rm_src,'删除源文件(移动而不是复制)')
 		]
 		for w,t in tips: self._bind_tip(w,t)
 		self._update_states()
@@ -448,6 +460,7 @@ class ImageToolApp:
 		process_same=self.process_same_var.get(); quality=self.quality_var.get(); png3=self.png3_var.get()
 		pattern=self.pattern_var.get(); start=self.start_var.get(); step=self.step_var.get()
 		overwrite=OVERWRITE_MAP.get(self.overwrite_var.get(),'overwrite')
+		remove_src_on_rename=self.rename_remove_src.get()
 		out_dir=self.out_var.get().strip() or self.in_var.get().strip()
 		workers=max(1,self.workers_var.get())
 		tasks=[]; idx=start
@@ -483,11 +496,15 @@ class ImageToolApp:
 			else:
 				if self.dry_run:
 					if os.path.abspath(src)==os.path.abspath(dst): ok=True; msg='保持(预览)'
+					elif remove_src_on_rename: ok=True; msg='移动(预览)'
 					else: ok=True; msg='复制(预览)'
 				else:
 					try:
 						if os.path.abspath(src)==os.path.abspath(dst): ok=True; msg='保持'
-						else: shutil.copy2(src,dst); ok=True; msg='复制'
+						elif remove_src_on_rename:
+							shutil.move(src,dst); ok=True; msg='移动'
+						else:
+							shutil.copy2(src,dst); ok=True; msg='复制'
 					except Exception as e:
 						ok=False; msg=f'复制失败:{e}'
 			with lock:
@@ -523,7 +540,8 @@ class ImageToolApp:
 				elif m.startswith('LOG\t'):
 					try:
 						_tag,stage,src,dst,info=m.split('\t',4)
-						self.log.insert('', 'end', values=(stage, os.path.basename(src), os.path.basename(dst), info), tags=(src,))
+						stage_disp=STAGE_MAP_DISPLAY.get(stage,stage)
+						self.log.insert('', 'end', values=(stage_disp, os.path.basename(src), os.path.basename(dst), info), tags=(src,))
 					except Exception:
 						pass
 		except queue.Empty:
@@ -548,6 +566,16 @@ class ImageToolApp:
 			self.preview_label.configure(text=f'预览失败:{e}',image='')
 
 	def _update_states(self):
+		# 去重区
+		if hasattr(self,'frame_dedupe') and self.frame_dedupe:
+			dedupe_enabled = self.enable_dedupe.get()
+			for ch in self.frame_dedupe.winfo_children():
+				try:
+					if ch in (self.move_dir_entry,self.move_dir_btn):
+						# 先统一灰化，后面再根据动作单独处理
+						pass
+					ch.configure(state='normal' if dedupe_enabled else 'disabled')
+				except Exception: pass
 		if self.frame_convert:
 			enabled = self.enable_convert.get()
 			for ch in self.frame_convert.winfo_children():
@@ -568,7 +596,7 @@ class ImageToolApp:
 						ch.configure(state='normal' if enabled else 'disabled')
 				except Exception:
 					pass
-		need_move=ACTION_MAP.get(self.dedup_action_var.get(),'list')=='move'
+		need_move=ACTION_MAP.get(self.dedup_action_var.get(),'list')=='move' and self.enable_dedupe.get()
 		need_delete=ACTION_MAP.get(self.dedup_action_var.get(),'list')=='delete'
 		mv_st='normal' if need_move else 'disabled'
 		if self.move_dir_entry: \
