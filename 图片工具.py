@@ -238,6 +238,9 @@ class ImageToolApp:
 		self.process_same_var=tk.BooleanVar(value=False)
 		self.png3_var=tk.BooleanVar(value=False)
 		self.convert_remove_src=tk.BooleanVar(value=False)
+		self.ico_sizes_var=tk.StringVar(value='')  # 自定义尺寸输入
+		self.ico_keep_orig=tk.BooleanVar(value=False)
+		self.ico_size_vars={s:tk.BooleanVar(value=(s in (16,32,48,64))) for s in (16,32,48,64,128,256)}
 		ttk.Label(convert,text='格式').grid(row=0,column=0,sticky='e')
 		cb_fmt=ttk.Combobox(convert,textvariable=self.fmt_var,values=list(FMT_MAP.keys()),width=12,state='readonly'); cb_fmt.grid(row=0,column=1,sticky='w',padx=(0,12))
 		ttk.Label(convert,text='质量').grid(row=0,column=2,sticky='e')
@@ -246,7 +249,25 @@ class ImageToolApp:
 		cb_same=ttk.Checkbutton(convert,text='同格式也重存',variable=self.process_same_var); cb_same.grid(row=0,column=5,sticky='w')
 		cb_png3=ttk.Checkbutton(convert,text='PNG3压缩',variable=self.png3_var); cb_png3.grid(row=0,column=6,sticky='w')
 		cb_rm_src_convert=ttk.Checkbutton(convert,text='删源',variable=self.convert_remove_src); cb_rm_src_convert.grid(row=0,column=7,sticky='w',padx=(8,0))
-		for i in range(8): convert.columnconfigure(i,weight=1 if i==3 else 0)
+		# ICO 尺寸输入 (仅当选择 ico 有效)
+		lbl_ico=ttk.Label(convert,text='ICO尺寸')
+		ent_ico=ttk.Entry(convert,textvariable=self.ico_sizes_var,width=22)
+		lbl_ico.grid(row=1,column=0,sticky='e',pady=(4,0))
+		ent_ico.grid(row=1,column=1,sticky='w',pady=(4,0))
+		# 复选框区域
+		ico_box=ttk.Frame(convert)
+		ico_box.grid(row=1,column=2,columnspan=5,sticky='w',pady=(4,0))
+		self.ico_checks=[]
+		for i,s in enumerate((16,32,48,64,128,256)):
+			cb=ttk.Checkbutton(ico_box,text=str(s),variable=self.ico_size_vars[s])
+			cb.grid(row=0,column=i,sticky='w')
+			self.ico_checks.append(cb)
+		cb_keep=ttk.Checkbutton(ico_box,text='不改变',variable=self.ico_keep_orig)
+		cb_keep.grid(row=0,column=6,sticky='w',padx=(6,0))
+		self.ico_keep_cb=cb_keep; self.ico_custom_entry=ent_ico; self.ico_label=lbl_ico
+		convert.columnconfigure(3,weight=1)
+		for i in range(8):
+			if i!=3: convert.columnconfigure(i,weight=0)
 		# 重命名
 		ttk.Separator(outer,orient='horizontal').pack(fill='x',pady=(0,4))
 		rename=ttk.LabelFrame(outer,text='重命名'); rename.pack(fill='x',pady=(0,10))
@@ -324,6 +345,7 @@ class ImageToolApp:
 		self.enable_rename.trace_add('write', lambda *a: self._update_states())
 		self.enable_dedupe.trace_add('write', lambda *a: self._update_states())
 		self.dedup_action_var.trace_add('write', lambda *a: self._update_states())
+		self.fmt_var.trace_add('write', lambda *a: self._update_states())
 		# tooltips
 		tips=[
 			(ent_in,'输入目录/文件 (支持常见图片)'),(btn_in,'选择输入目录'),(btn_in_file,'选择单个图片文件'),(cb_rec,'是否递归子目录 (单文件时忽略)'),
@@ -334,8 +356,17 @@ class ImageToolApp:
 			*( [(self.trash_cb,'仅删除重复时可用 (send2trash)')] if self.trash_cb else [] ),
 			(self.move_dir_entry,'重复文件移动目标'),(self.move_dir_btn,'选择移动目录'),
 			(cb_fmt,'目标格式'),(sc_q,'拖动调整质量'),(sp_q,'直接输入质量 1-100'),(cb_same,'同格式也重新编码'),(cb_png3,'PNG 高压缩'),(cb_rm_src_convert,'转换后删除源文件'),
+			(ent_ico,'ICO 自定义尺寸: 逗号/空格分隔 例如 24,40'),
+		]
+		# 补充 ico 勾选尺寸 tips
+		for c in self.ico_checks:
+			tips.append((c,'勾选加入该尺寸'))
+		# 继续追加其余
+		more_tips=[
+			(self.ico_keep_cb,'仅输出原图尺寸 (忽略其它选择)'),
 			(ent_pattern,'重命名模式: {name}{ext}{index}{fmt}'),(sp_start,'序号起始'),(sp_step,'序号步长'),(cb_over,'覆盖策略'),(cb_rm_src,'删除源文件(移动而不是复制)')
 		]
+		tips.extend(more_tips)
 		for w,t in tips: self._bind_tip(w,t)
 		self._update_states()
 		# 原始日志缓存 (用于筛选)
@@ -524,6 +555,27 @@ class ImageToolApp:
 		overwrite=OVERWRITE_MAP.get(self.overwrite_var.get(),'overwrite')
 		remove_src_on_rename=self.rename_remove_src.get()
 		remove_src_on_convert=self.convert_remove_src.get()
+		ico_sizes=None
+		if hasattr(self,'ico_keep_orig') and self.ico_keep_orig.get():
+			ico_sizes=None  # Pillow 会用原图尺寸
+		else:
+			# 勾选尺寸 + 自定义输入合并
+			chosen=[]
+			if hasattr(self,'ico_size_vars'):
+				for s,var in self.ico_size_vars.items():
+					if var.get(): chosen.append(s)
+			custom=self.ico_sizes_var.get().strip() if hasattr(self,'ico_sizes_var') else ''
+			if custom:
+				for token in custom.replace('；',';').replace(',', ' ').replace(';',' ').split():
+					if token.isdigit():
+						v=int(token)
+						if 1<=v<=1024: chosen.append(v)
+			if chosen:
+				# 去重排序
+				uniq=[]
+				for v in sorted(set(chosen)):
+					uniq.append(v)
+				ico_sizes=uniq[:10]
 		out_dir=self.out_var.get().strip() or self.in_var.get().strip()
 		workers=max(1,self.workers_var.get())
 		tasks=[]; idx=start
@@ -589,10 +641,10 @@ class ImageToolApp:
 			if need_convert:
 				if self.dry_run:
 					# 实际执行一次到缓存，保证可预览
-					ok_convert,msg_convert=convert_one(src,convert_path,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False,None if tgt!='ico' else [16,32,48,64,128,256])
+					ok_convert,msg_convert=convert_one(src,convert_path,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False, ico_sizes if tgt=='ico' else None)
 					msg_convert = ('转换(预览)' if ok_convert else '转换失败(预览)')
 				else:
-					ok_convert,msg_convert=convert_one(src,convert_path,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False,None if tgt!='ico' else [16,32,48,64,128,256])
+					ok_convert,msg_convert=convert_one(src,convert_path,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False, ico_sizes if tgt=='ico' else None)
 					if ok_convert and remove_src_on_convert:
 						use_trash = bool(self.use_trash.get()) if self.use_trash is not None else False
 						ok_del, msg_del = safe_delete(src, use_trash)
@@ -804,6 +856,18 @@ class ImageToolApp:
 						ch.configure(state='normal' if enabled else 'disabled')
 				except Exception:
 					pass
+			# 仅当目标格式为 ico 时尺寸输入启用
+			try:
+				fmt_cur=FMT_MAP.get(self.fmt_var.get(),'')
+				ico_enabled=(fmt_cur=='ico') and enabled
+				state='normal' if ico_enabled else 'disabled'
+				if hasattr(self,'ico_label'): self.ico_label.configure(state=state)
+				if hasattr(self,'ico_custom_entry'): self.ico_custom_entry.configure(state=state)
+				if hasattr(self,'ico_keep_cb'): self.ico_keep_cb.configure(state=state)
+				if hasattr(self,'ico_checks'):
+					for cb in self.ico_checks: cb.configure(state=state)
+			except Exception:
+				pass
 		if self.frame_rename:
 			enabled = self.enable_rename.get()
 			for ch in self.frame_rename.winfo_children():
