@@ -20,6 +20,7 @@ try:
 	from PIL import Image, ImageSequence, ImageFile, ImageTk  # type: ignore
 except Exception:  # pragma: no cover
 	Image=None  # type: ignore
+	ImageFile=None  # type: ignore
 
 # Windows 回收站支持 (可选)
 try:
@@ -27,7 +28,8 @@ try:
 except Exception:  # pragma: no cover
 	send2trash=None  # type: ignore
 
-ImageFile.LOAD_TRUNCATED_IMAGES = True  # 更宽容
+if ImageFile:
+	ImageFile.LOAD_TRUNCATED_IMAGES = True  # 更宽容
 SUPPORTED_EXT={'.jpg','.jpeg','.png','.webp','.gif','.bmp','.tiff','.ico'}
 
 # 显示 -> 内部代码 映射
@@ -128,7 +130,7 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None):
 			else:
 				params={}
 				if fmt=='jpg':
-					params['quality']=quality or 85
+					params['quality']=quality or 100
 					if im.mode in ('RGBA','LA'):
 						bg=Image.new('RGB',im.size,(255,255,255))
 						bg.paste(im,mask=im.split()[-1])
@@ -165,8 +167,11 @@ class ImageToolApp:
 		self.use_trash=tk.BooleanVar(value=(send2trash is not None)) if tk else None
 		self.trash_cb=None
 		self.last_out_dir=None
+		self.cache_dir=None  # 预览缓存文件夹
 		self._build()
 		self.root.after(200,self._drain)
+		# 退出时清理缓存
+		self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
 	# ---------------- UI ----------------
 	def _build(self):
@@ -181,6 +186,7 @@ class ImageToolApp:
 		self.recursive_var=tk.BooleanVar(value=True); cb_rec=ttk.Checkbutton(io,text='递归',variable=self.recursive_var); cb_rec.grid(row=0,column=4,sticky='w')
 		ttk.Label(io,text='输出:').grid(row=0,column=5,sticky='e')
 		self.out_var=tk.StringVar(); ent_out=ttk.Entry(io,textvariable=self.out_var,width=32); ent_out.grid(row=0,column=6,sticky='we',padx=3)
+		self.out_var.trace_add('write', self._on_out_dir_change)
 		btn_out=ttk.Button(io,text='选择',command=self._pick_out,width=6); btn_out.grid(row=0,column=7,padx=(2,0))
 		btn_open_out=ttk.Button(io,text='打开',command=self._open_last_out,width=6); btn_open_out.grid(row=0,column=8,padx=(4,0))
 		# 功能
@@ -228,9 +234,10 @@ class ImageToolApp:
 		convert=ttk.LabelFrame(outer,text='格式转换'); convert.pack(fill='x',pady=(0,10))
 		self.frame_convert=convert
 		self.fmt_var=tk.StringVar(value=_rev_map(FMT_MAP)['webp'])
-		self.quality_var=tk.IntVar(value=85)
+		self.quality_var=tk.IntVar(value=100)
 		self.process_same_var=tk.BooleanVar(value=False)
 		self.png3_var=tk.BooleanVar(value=False)
+		self.convert_remove_src=tk.BooleanVar(value=False)
 		ttk.Label(convert,text='格式').grid(row=0,column=0,sticky='e')
 		cb_fmt=ttk.Combobox(convert,textvariable=self.fmt_var,values=list(FMT_MAP.keys()),width=12,state='readonly'); cb_fmt.grid(row=0,column=1,sticky='w',padx=(0,12))
 		ttk.Label(convert,text='质量').grid(row=0,column=2,sticky='e')
@@ -238,7 +245,8 @@ class ImageToolApp:
 		sp_q=ttk.Spinbox(convert,from_=1,to=100,textvariable=self.quality_var,width=5); sp_q.grid(row=0,column=4,sticky='w',padx=(0,8))
 		cb_same=ttk.Checkbutton(convert,text='同格式也重存',variable=self.process_same_var); cb_same.grid(row=0,column=5,sticky='w')
 		cb_png3=ttk.Checkbutton(convert,text='PNG3压缩',variable=self.png3_var); cb_png3.grid(row=0,column=6,sticky='w')
-		for i in range(7): convert.columnconfigure(i,weight=1 if i==3 else 0)
+		cb_rm_src_convert=ttk.Checkbutton(convert,text='删源',variable=self.convert_remove_src); cb_rm_src_convert.grid(row=0,column=7,sticky='w',padx=(8,0))
+		for i in range(8): convert.columnconfigure(i,weight=1 if i==3 else 0)
 		# 重命名
 		ttk.Separator(outer,orient='horizontal').pack(fill='x',pady=(0,4))
 		rename=ttk.LabelFrame(outer,text='重命名'); rename.pack(fill='x',pady=(0,10))
@@ -265,6 +273,25 @@ class ImageToolApp:
 		self.status_var=tk.StringVar(value='就绪'); ttk.Label(outer,textvariable=self.status_var,foreground='blue').pack(fill='x')
 		# 日志
 		ttk.Separator(outer,orient='horizontal').pack(fill='x',pady=(4,4))
+		# 日志筛选工具条
+		filter_bar=ttk.Frame(outer); filter_bar.pack(fill='x',pady=(0,2))
+		self.log_filter_stage=tk.StringVar(value='全部')
+		self.log_filter_kw=tk.StringVar()
+		self.log_filter_fail=tk.BooleanVar(value=False)
+		ttk.Label(filter_bar,text='筛选:').pack(side='left')
+		cb_stage=ttk.Combobox(filter_bar,width=8,state='readonly',textvariable=self.log_filter_stage,
+			values=['全部','去重','转换','重命名','删除','移动','保留','信息'])
+		cb_stage.pack(side='left',padx=(2,4))
+		ent_kw=ttk.Entry(filter_bar,width=18,textvariable=self.log_filter_kw)
+		ent_kw.pack(side='left');
+		cb_fail=ttk.Checkbutton(filter_bar,text='仅失败',variable=self.log_filter_fail)
+		cb_fail.pack(side='left',padx=(6,0))
+		btn_reset=ttk.Button(filter_bar,text='重置',width=6,command=lambda: self._reset_log_filter())
+		btn_reset.pack(side='right',padx=(4,0))
+		# 绑定变更实时刷新
+		self.log_filter_stage.trace_add('write', self._on_change_log_filter)
+		self.log_filter_kw.trace_add('write', self._on_change_log_filter)
+		self.log_filter_fail.trace_add('write', self._on_change_log_filter)
 		pan=ttk.PanedWindow(outer,orient='vertical'); pan.pack(fill='both',expand=True)
 		upper=ttk.Frame(pan); lower=ttk.Frame(pan); pan.add(upper,weight=3); pan.add(lower,weight=2)
 		upper.columnconfigure(0,weight=1); upper.rowconfigure(0,weight=1)
@@ -272,6 +299,16 @@ class ImageToolApp:
 		self.log=ttk.Treeview(upper,columns=[c[0] for c in cols],show='headings',height=12)
 		for cid,txt,w in cols: self.log.heading(cid,text=txt); self.log.column(cid,width=w,anchor='w',stretch=True)
 		self.log.grid(row=0,column=0,sticky='nsew')
+		# 阶段着色 (使用 tag 样式)
+		style=ttk.Style(self.root)
+		# 尝试设置浅色背景，兼容浅/深色主题用户可自行调整
+		self.log.tag_configure('STAGE_DEDUPE', background='#FFF5E6')      # 淡橙 去重
+		self.log.tag_configure('STAGE_CONVERT', background='#E6F5FF')     # 淡蓝 转换
+		self.log.tag_configure('STAGE_RENAME', background='#F0E6FF')      # 淡紫 重命名
+		self.log.tag_configure('STAGE_DELETE', background='#FFE6E6')      # 淡红 删除
+		self.log.tag_configure('STAGE_MOVE', background='#E6FFE6')        # 淡绿 移动
+		self.log.tag_configure('STAGE_KEEP', background='#F5F5F5')        # 灰白 保留
+		self.log.tag_configure('STAGE_INFO', background='#EEEEEE')        # 信息行
 		vsb=ttk.Scrollbar(upper,orient='vertical',command=self.log.yview); vsb.grid(row=0,column=1,sticky='ns')
 		hsb=ttk.Scrollbar(upper,orient='horizontal',command=self.log.xview); hsb.grid(row=1,column=0,sticky='we')
 		self.log.configure(yscrollcommand=vsb.set,xscrollcommand=hsb.set)
@@ -296,11 +333,13 @@ class ImageToolApp:
 			(sp_th,'相似阈值 0：严格 |  >0：近似'),(cb_keep,'重复组保留策略'),(cb_action,'重复文件动作'),
 			*( [(self.trash_cb,'仅删除重复时可用 (send2trash)')] if self.trash_cb else [] ),
 			(self.move_dir_entry,'重复文件移动目标'),(self.move_dir_btn,'选择移动目录'),
-			(cb_fmt,'目标格式'),(sc_q,'拖动调整质量'),(sp_q,'直接输入质量 1-100'),(cb_same,'同格式也重新编码'),(cb_png3,'PNG 高压缩'),
+			(cb_fmt,'目标格式'),(sc_q,'拖动调整质量'),(sp_q,'直接输入质量 1-100'),(cb_same,'同格式也重新编码'),(cb_png3,'PNG 高压缩'),(cb_rm_src_convert,'转换后删除源文件'),
 			(ent_pattern,'重命名模式: {name}{ext}{index}{fmt}'),(sp_start,'序号起始'),(sp_step,'序号步长'),(cb_over,'覆盖策略'),(cb_rm_src,'删除源文件(移动而不是复制)')
 		]
 		for w,t in tips: self._bind_tip(w,t)
 		self._update_states()
+		# 原始日志缓存 (用于筛选)
+		self._raw_logs=[]  # list of tuples (stage, src_full, dst_full, info, display_values, tags)
 
 	# 事件
 	def _pick_in(self):
@@ -320,6 +359,10 @@ class ImageToolApp:
 		if self.worker and self.worker.is_alive():
 			messagebox.showinfo('提示','任务运行中'); return
 		self.dry_run=dry_run
+		# 在开始时清除缓存
+		self._clear_cache()
+		if dry_run:
+			self._ensure_cache_dir()
 		inp=self.in_var.get().strip()
 		if not inp: self.status_var.set('未选择输入'); return
 		if os.path.isdir(inp):
@@ -338,7 +381,7 @@ class ImageToolApp:
 		if not self._all_files: self.status_var.set('无图片'); return
 		for i in self.log.get_children(): self.log.delete(i)
 		self.progress['value']=0; self.progress['maximum']=len(self._all_files)
-		self.status_var.set('开始...')
+		self.status_var.set('开始...' if not dry_run else '预览模式 (不修改文件)')
 		self.stop_flag.clear(); self.last_out_dir=out_dir
 		self.worker=threading.Thread(target=self._pipeline,daemon=True); self.worker.start()
 
@@ -361,6 +404,25 @@ class ImageToolApp:
 			self.status_var.set('已打开输出目录')
 		except Exception as e:
 			self.status_var.set(f'打开失败:{e}')
+
+	def _ensure_cache_dir(self):
+		if self.cache_dir and os.path.exists(self.cache_dir):
+			return
+		out_dir = self.out_var.get().strip() or os.getcwd()
+		self.cache_dir = os.path.join(out_dir, '.preview_cache')
+		os.makedirs(self.cache_dir, exist_ok=True)
+
+	def _clear_cache(self):
+		if self.cache_dir and os.path.exists(self.cache_dir):
+			try:
+				shutil.rmtree(self.cache_dir)
+				self.cache_dir = None
+			except Exception:
+				pass
+
+	def _on_close(self):
+		self._clear_cache()
+		self.root.destroy()
 
 	def _preview(self):
 		if self.worker and self.worker.is_alive():
@@ -461,6 +523,7 @@ class ImageToolApp:
 		pattern=self.pattern_var.get(); start=self.start_var.get(); step=self.step_var.get()
 		overwrite=OVERWRITE_MAP.get(self.overwrite_var.get(),'overwrite')
 		remove_src_on_rename=self.rename_remove_src.get()
+		remove_src_on_convert=self.convert_remove_src.get()
 		out_dir=self.out_var.get().strip() or self.in_var.get().strip()
 		workers=max(1,self.workers_var.get())
 		tasks=[]; idx=start
@@ -486,16 +549,23 @@ class ImageToolApp:
 					final_path=next_non_conflict(final_path) if not self.dry_run else final_path+"(预览改名)"
 			# 是否需要后续重命名（仅当启用重命名且最终名不同于默认名）
 			will_rename = self.enable_rename.get() and (final_basename != default_basename)
-			# 中间转换输出路径
+			# 中间转换/复制输出路径：
+			#  1) 需要转换: 中间文件=default_basename (若后续重命名) 否则直接是最终文件
+			#  2) 仅重命名: 中间文件应为 default_basename，最终文件= pattern 结果
 			if need_convert:
-				convert_basename=default_basename if will_rename else final_basename
-				convert_path=os.path.join(out_dir,convert_basename)
-				if will_rename:
-					# 避免中间名冲突
-					if os.path.exists(convert_path) and convert_path!=final_path:
-						convert_path=next_non_conflict(convert_path)
+				convert_basename = default_basename if will_rename else final_basename
+				convert_path = os.path.join(out_dir, convert_basename)
+				if will_rename and os.path.exists(convert_path) and convert_path!=final_path:
+					convert_path = next_non_conflict(convert_path)
 			else:
-				convert_path=final_path; convert_basename=final_basename
+				if will_rename:
+					convert_basename = default_basename
+					convert_path = os.path.join(out_dir, convert_basename)
+					if os.path.exists(convert_path) and convert_path!=final_path:
+						convert_path = next_non_conflict(convert_path)
+				else:
+					convert_basename = final_basename
+					convert_path = final_path
 			tasks.append((f,need_convert,tgt_fmt,convert_path,final_path,will_rename,convert_basename,final_basename,idx))
 			idx+=step
 		total=len(tasks); self.q.put(f'STATUS 转换/重命名 共{total}')
@@ -504,23 +574,46 @@ class ImageToolApp:
 			nonlocal done
 			src,need_convert,tgt,convert_path,final_path,will_rename,convert_basename,final_basename,_idx=spec
 			if self.stop_flag.is_set(): return
-			if not self.dry_run:
+			# 预览时使用缓存路径
+			if self.dry_run:
+				# 将所有目标映射到缓存；区分转换/复制与重命名阶段
+				if need_convert:
+					convert_path = os.path.join(self.cache_dir, convert_basename)
+				else:
+					convert_path = os.path.join(self.cache_dir, convert_basename)
+				if will_rename:
+					final_path = os.path.join(self.cache_dir, final_basename)
+			else:
 				os.makedirs(os.path.dirname(convert_path),exist_ok=True)
 			msg_convert=''; ok_convert=True
 			if need_convert:
 				if self.dry_run:
-					ok_convert=True; msg_convert='转换(预览)'
+					# 实际执行一次到缓存，保证可预览
+					ok_convert,msg_convert=convert_one(src,convert_path,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False,None if tgt!='ico' else [16,32,48,64,128,256])
+					msg_convert = ('转换(预览)' if ok_convert else '转换失败(预览)')
 				else:
 					ok_convert,msg_convert=convert_one(src,convert_path,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False,None if tgt!='ico' else [16,32,48,64,128,256])
+					if ok_convert and remove_src_on_convert:
+						use_trash = bool(self.use_trash.get()) if self.use_trash is not None else False
+						ok_del, msg_del = safe_delete(src, use_trash)
+						if not ok_del:
+							msg_convert += f' (删源失败:{msg_del})'
 			else:
 				# 纯重命名/复制路径
 				if self.dry_run:
-					if os.path.abspath(src)==os.path.abspath(convert_path):
-						ok_convert=True; msg_convert='保持(预览)'
-					elif remove_src_on_rename:
-						ok_convert=True; msg_convert='移动(预览)'
-					else:
-						ok_convert=True; msg_convert='复制(预览)'
+					# 预览: 复制源到中间(或最终)缓存，保证存在
+					try:
+						if os.path.abspath(src)!=os.path.abspath(convert_path):
+							shutil.copy2(src, convert_path)
+						ok_convert=True
+						if os.path.abspath(src)==os.path.abspath(convert_path):
+							msg_convert='保持(预览)'
+						elif remove_src_on_rename:
+							msg_convert='移动(预览)'
+						else:
+							msg_convert='复制(预览)'
+					except Exception as e:
+						ok_convert=False; msg_convert=f'复制失败(预览):{e}'
 				else:
 					try:
 						if os.path.abspath(src)==os.path.abspath(convert_path):
@@ -535,7 +628,14 @@ class ImageToolApp:
 			msg_rename=''; ok_rename=True
 			if will_rename:
 				if self.dry_run:
-					ok_rename=True; msg_rename='命名(预览)'
+					try:
+						if convert_path!=final_path:
+							# 拷贝中间文件到最终缓存名
+							if os.path.exists(convert_path):
+								shutil.copy2(convert_path, final_path)
+						ok_rename=True; msg_rename='命名(预览)'
+					except Exception as e:
+						ok_rename=False; msg_rename=f'命名失败(预览):{e}'
 				else:
 					try:
 						os.replace(convert_path,final_path)
@@ -580,7 +680,19 @@ class ImageToolApp:
 					try:
 						_tag,stage,src,dst,info=m.split('\t',4)
 						stage_disp=STAGE_MAP_DISPLAY.get(stage,stage)
-						self.log.insert('', 'end', values=(stage_disp, os.path.basename(src), os.path.basename(dst), info), tags=(src,))
+						# 根据 stage 推断 tag
+						stag='STAGE_INFO'
+						if stage=='DEDUP': stag='STAGE_DEDUPE'
+						elif stage=='CONVERT': stag='STAGE_CONVERT'
+						elif stage=='RENAME': stag='STAGE_RENAME'
+						elif '删' in info or '删除' in info: stag='STAGE_DELETE'
+						elif '移动' in info: stag='STAGE_MOVE'
+						elif '保留' in info: stag='STAGE_KEEP'
+						vals=(stage_disp, os.path.basename(src), os.path.basename(dst), info)
+						row_tags=(src,dst,stag)
+						self._raw_logs.append((stage,src,dst,info,vals,row_tags))
+						if self._log_row_visible(stage,info,vals):
+							self.log.insert('', 'end', values=vals, tags=row_tags)
 					except Exception:
 						pass
 		except queue.Empty:
@@ -591,8 +703,41 @@ class ImageToolApp:
 	def _on_select_row(self,_=None):
 		sel=self.log.selection();
 		if not sel: return
-		path=self.log.item(sel[0],'tags')[0]
-		if not os.path.exists(path):
+		values = self.log.item(sel[0],'values')
+		if len(values) < 3: return
+		stage_disp, src_basename, dst_basename, info = values[:4]
+		tags = self.log.item(sel[0],'tags') or []  # (src_full, dst_full, stage_tag)
+		src_full = tags[0] if len(tags)>=1 else ''
+		dst_full_logged = tags[1] if len(tags)>=2 else ''
+		# 判断应该显示哪个目标：
+		# 对于去重阶段：
+		#   - 行格式1: 重复文件 -> 保留文件 (dst=保留原图) 预览应显示保留文件(即 dst_full_logged)
+		#   - 行格式2: 保留文件 -> 组#X  预览显示保留文件
+		# 对于转换/重命名阶段：显示转换后/重命名后的 dst
+		# 预览模式使用缓存映射
+		if self.dry_run:
+			cache_dst = os.path.join(self.cache_dir, dst_basename)
+			candidate_paths = [cache_dst]
+			# 对于 dedupe 组# 行，dst_basename 不是文件名，改用 src_full (保留)
+			if not os.path.splitext(dst_basename)[1]:  # 没有扩展名，可能是 组#
+				candidate_paths.insert(0, os.path.join(self.cache_dir, os.path.basename(src_full)))
+		else:
+			out_dir = self.out_var.get().strip() or self.in_var.get().strip()
+			candidate_paths = []
+			# 如果 dst_full_logged 是实际路径且存在则优先
+			if dst_full_logged and os.path.isfile(dst_full_logged):
+				candidate_paths.append(dst_full_logged)
+			# 常规推导
+			candidate_paths.append(os.path.join(out_dir, dst_basename))
+			# 对于去重保留行
+			if not os.path.splitext(dst_basename)[1]:  # 组#
+				candidate_paths.append(src_full)
+		# 选择第一个存在的
+		path=None
+		for p in candidate_paths:
+			if p and os.path.exists(p):
+				path=p; break
+		if path is None:
 			self.preview_label.configure(text='文件不存在',image=''); return
 		try:
 			with Image.open(path) as im:  # type: ignore
@@ -603,6 +748,40 @@ class ImageToolApp:
 			self.preview_info.set(f'{w}x{h} {os.path.basename(path)}')
 		except Exception as e:
 			self.preview_label.configure(text=f'预览失败:{e}',image='')
+
+	def _log_row_visible(self,stage:str,info:str,vals:tuple)->bool:
+		stage_map={'DEDUP':'去重','CONVERT':'转换','RENAME':'重命名'}
+		stage_ch=stage_map.get(stage,'信息')
+		want=self.log_filter_stage.get() if hasattr(self,'log_filter_stage') else '全部'
+		if want!='全部':
+			if want=='删除' and ('删' in info or '删除' in info): pass
+			elif want=='移动' and '移动' in info: pass
+			elif want=='保留' and '保留' in info: pass
+			elif want==stage_ch: pass
+			elif want=='信息' and stage_ch=='信息': pass
+			else: return False
+		if hasattr(self,'log_filter_fail') and self.log_filter_fail.get():
+			if '失败' not in info and '错' not in info:
+				return False
+		if hasattr(self,'log_filter_kw'):
+			kw=self.log_filter_kw.get().strip()
+			if kw:
+				joined=' '.join(str(x) for x in vals)
+				if kw.lower() not in joined.lower(): return False
+		return True
+
+	def _on_change_log_filter(self,*a):
+		if not hasattr(self,'_raw_logs'): return
+		for iid in self.log.get_children(): self.log.delete(iid)
+		for stage,src,dst,info,vals,tags in self._raw_logs:
+			if self._log_row_visible(stage,info,vals):
+				self.log.insert('', 'end', values=vals, tags=tags)
+
+	def _reset_log_filter(self):
+		if hasattr(self,'log_filter_stage'): self.log_filter_stage.set('全部')
+		if hasattr(self,'log_filter_kw'): self.log_filter_kw.set('')
+		if hasattr(self,'log_filter_fail'): self.log_filter_fail.set(False)
+		self._on_change_log_filter()
 
 	def _update_states(self):
 		# 去重区
@@ -686,6 +865,9 @@ class ImageToolApp:
 		if not tags: return
 		full=tags[0]
 		self._tooltip_after=self.root.after(500, lambda p=full,x=self.root.winfo_pointerx(),y=self.root.winfo_pointery(): self._show_tooltip(p,x,y))
+	def _on_out_dir_change(self, *args):
+		# 输出目录改变时清除缓存
+		self._clear_cache()
 		self.root.bind('<Leave>',lambda e: self._hide_tooltip(),add='+')
 
 # 启动
