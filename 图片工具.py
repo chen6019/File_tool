@@ -468,49 +468,88 @@ class ImageToolApp:
 			src_ext=norm_ext(f)
 			tgt_fmt=fmt if self.enable_convert.get() else src_ext
 			need_convert=self.enable_convert.get() and (src_ext!=fmt or process_same)
-			name=pattern.replace('{name}',os.path.splitext(os.path.basename(f))[0])\
-						  .replace('{ext}',src_ext)\
-						  .replace('{fmt}',tgt_fmt)
+			orig_stem=os.path.splitext(os.path.basename(f))[0]
+			default_basename=f"{orig_stem}.{tgt_fmt}"  # 转换后默认文件名
+			# 计算最终命名
+			name=pattern.replace('{name}',orig_stem)\
+						.replace('{ext}',src_ext)\
+						.replace('{fmt}',tgt_fmt)
 			if '{index}' in name: name=name.replace('{index}',str(idx))
 			if '.' not in os.path.basename(name): name+=f'.{tgt_fmt}'
-			dst=os.path.join(out_dir,name)
-			if os.path.exists(dst):
+			final_basename=os.path.basename(name)
+			final_path=os.path.join(out_dir,final_basename)
+			# 冲突处理针对最终文件名
+			if os.path.exists(final_path):
 				if overwrite=='skip':
-					self.q.put(f'LOG\tCONVERT\t{f}\t{dst}\t跳过(存在)'); idx+=step; continue
+					self.q.put(f'LOG\tCONVERT\t{f}\t{final_path}\t跳过(存在)'); idx+=step; continue
 				elif overwrite=='rename':
-					dst=next_non_conflict(dst) if not self.dry_run else dst+"(预览改名)"
-			tasks.append((f,dst,need_convert,tgt_fmt)); idx+=step
+					final_path=next_non_conflict(final_path) if not self.dry_run else final_path+"(预览改名)"
+			# 是否需要后续重命名（仅当启用重命名且最终名不同于默认名）
+			will_rename = self.enable_rename.get() and (final_basename != default_basename)
+			# 中间转换输出路径
+			if need_convert:
+				convert_basename=default_basename if will_rename else final_basename
+				convert_path=os.path.join(out_dir,convert_basename)
+				if will_rename:
+					# 避免中间名冲突
+					if os.path.exists(convert_path) and convert_path!=final_path:
+						convert_path=next_non_conflict(convert_path)
+			else:
+				convert_path=final_path; convert_basename=final_basename
+			tasks.append((f,need_convert,tgt_fmt,convert_path,final_path,will_rename,convert_basename,final_basename,idx))
+			idx+=step
 		total=len(tasks); self.q.put(f'STATUS 转换/重命名 共{total}')
 		done=0; lock=threading.Lock()
 		def job(spec):
 			nonlocal done
-			src,dst,need_convert,tgt=spec
+			src,need_convert,tgt,convert_path,final_path,will_rename,convert_basename,final_basename,_idx=spec
 			if self.stop_flag.is_set(): return
 			if not self.dry_run:
-				os.makedirs(os.path.dirname(dst),exist_ok=True)
+				os.makedirs(os.path.dirname(convert_path),exist_ok=True)
+			msg_convert=''; ok_convert=True
 			if need_convert:
 				if self.dry_run:
-					ok=True; msg='转换(预览)'
+					ok_convert=True; msg_convert='转换(预览)'
 				else:
-					ok,msg=convert_one(src,dst,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False,None if tgt!='ico' else [16,32,48,64,128,256])
+					ok_convert,msg_convert=convert_one(src,convert_path,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False,None if tgt!='ico' else [16,32,48,64,128,256])
 			else:
+				# 纯重命名/复制路径
 				if self.dry_run:
-					if os.path.abspath(src)==os.path.abspath(dst): ok=True; msg='保持(预览)'
-					elif remove_src_on_rename: ok=True; msg='移动(预览)'
-					else: ok=True; msg='复制(预览)'
+					if os.path.abspath(src)==os.path.abspath(convert_path):
+						ok_convert=True; msg_convert='保持(预览)'
+					elif remove_src_on_rename:
+						ok_convert=True; msg_convert='移动(预览)'
+					else:
+						ok_convert=True; msg_convert='复制(预览)'
 				else:
 					try:
-						if os.path.abspath(src)==os.path.abspath(dst): ok=True; msg='保持'
+						if os.path.abspath(src)==os.path.abspath(convert_path):
+							ok_convert=True; msg_convert='保持'
 						elif remove_src_on_rename:
-							shutil.move(src,dst); ok=True; msg='移动'
+							shutil.move(src,convert_path); ok_convert=True; msg_convert='移动'
 						else:
-							shutil.copy2(src,dst); ok=True; msg='复制'
+							shutil.copy2(src,convert_path); ok_convert=True; msg_convert='复制'
 					except Exception as e:
-						ok=False; msg=f'复制失败:{e}'
+						ok_convert=False; msg_convert=f'复制失败:{e}'
+			# 如果需要重命名(第二阶段)
+			msg_rename=''; ok_rename=True
+			if will_rename:
+				if self.dry_run:
+					ok_rename=True; msg_rename='命名(预览)'
+				else:
+					try:
+						os.replace(convert_path,final_path)
+						ok_rename=True; msg_rename='命名'
+					except Exception as e:
+						ok_rename=False; msg_rename=f'命名失败:{e}'
 			with lock:
 				done+=1
-				stage='CONVERT' if need_convert else 'RENAME'
-				self.q.put(f'LOG\t{stage}\t{src}\t{dst}\t{msg if ok else "失败:"+msg}')
+				# 记录转换/复制阶段
+				stage1='CONVERT' if need_convert else 'RENAME'
+				self.q.put(f'LOG\t{stage1}\t{src}\t{convert_path}\t{msg_convert if ok_convert else "失败:"+msg_convert}')
+				# 记录真正重命名阶段
+				if will_rename:
+					self.q.put(f'LOG\tRENAME\t{convert_path}\t{final_path}\t{msg_rename if ok_rename else "失败:"+msg_rename}')
 				self.q.put(f'PROG {done} {total}')
 		if workers>1:
 			with ThreadPoolExecutor(max_workers=workers) as ex:
