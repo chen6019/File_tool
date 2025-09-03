@@ -225,8 +225,10 @@ class ImageToolApp:
 		self.enable_rename=tk.BooleanVar(value=False)
 		# 比例分类配置 (新独立区域)
 		self.classify_ratio_var=tk.BooleanVar(value=False)
-		self.ratio_tol_var=tk.DoubleVar(value=0.10)
-		self.ratio_custom_var=tk.StringVar(value='')
+		# 比例分类默认容差 15%
+		self.ratio_tol_var=tk.DoubleVar(value=0.15)
+		# 保留常用预设: 16:9,3:2,4:3,1:1,21:9
+		self.ratio_custom_var=tk.StringVar(value='16:9,3:2,4:3,1:1,21:9')
 		self.ratio_snap_var=tk.BooleanVar(value=False)  # 不匹配是否取最近
 		cb_classify=ttk.Checkbutton(opts,text='分类',variable=self.classify_ratio_var); cb_classify.pack(side='left',padx=2)
 		cb_convert=ttk.Checkbutton(opts,text='转换',variable=self.enable_convert); cb_convert.pack(side='left',padx=2)
@@ -247,7 +249,7 @@ class ImageToolApp:
 		self.cb_ratio_inner_snap=ttk.Checkbutton(clsf,text='不匹配吸附最近',variable=self.ratio_snap_var)
 		cb_tol_label=ttk.Label(clsf,text='容差')
 		sp_rt=ttk.Spinbox(clsf,from_=0.0,to=0.2,increment=0.005,format='%.3f',width=6,textvariable=self.ratio_tol_var)
-		btn_reset_ratio=ttk.Button(clsf,text='恢复默认',width=10,command=lambda: self.ratio_custom_var.set('16:9,16:10,4:3,3:2,5:4,21:9,1:1'))
+		btn_reset_ratio=ttk.Button(clsf,text='恢复默认',width=10,command=lambda: self.ratio_custom_var.set('16:9,3:2,4:3,1:1,21:9'))
 		lbl_ratio_input=ttk.Label(clsf,text='自定义(16:9 16x10 ...)')
 		ent_ratio=ttk.Entry(clsf,textvariable=self.ratio_custom_var,width=58)
 		# 保存引用供后续 tooltip / 状态控制
@@ -483,7 +485,7 @@ class ImageToolApp:
 		if hasattr(self,'frame_ratio'):
 			more_tips.append((self.frame_ratio,'按常见比例创建子目录或占位符 {ratio}; 自定义: 16:9,4:3 ...; 吸附=选最近比值'))
 			if hasattr(self,'_ratio_snap'): more_tips.append((self._ratio_snap,'未命中容差时是否取最近比值标签'))
-			if hasattr(self,'_ratio_sp_rt'): more_tips.append((self._ratio_sp_rt,'相对误差容差, 比如 0.10=±10%'))
+			if hasattr(self,'_ratio_sp_rt'): more_tips.append((self._ratio_sp_rt,'相对误差容差, 默认 0.15=±15%'))
 			if hasattr(self,'_ratio_ent'): more_tips.append((self._ratio_ent,'自定义列表, 支持 16:9 / 16x9 形式'))
 			# 顶部启用按钮为 cb_classify (在 opts), 这里不重复
 		tips.extend(more_tips)
@@ -972,8 +974,8 @@ class ImageToolApp:
 	def _parse_custom_ratios(self)->list[tuple[int,int,str]]:
 		text=self.ratio_custom_var.get().strip() if hasattr(self,'ratio_custom_var') else ''
 		if not text:
-			# 若未自定义则使用默认一组，但仍视作“自定义列表”
-			text='16:9,16:10,4:3,3:2,5:4,21:9,1:1'
+			# 若未自定义则使用默认一组
+			text='16:9,3:2,4:3,1:1,21:9'
 		pairs=[]
 		for token in re.split(r'[;,\s]+',text):
 			if not token: continue
@@ -996,7 +998,7 @@ class ImageToolApp:
 		返回新路径列表 (分类后路径)。"""
 		COMMON=self._parse_custom_ratios()
 		if not COMMON: return file_list
-		tol=self.ratio_tol_var.get() if hasattr(self,'ratio_tol_var') else 0.10
+		tol=self.ratio_tol_var.get() if hasattr(self,'ratio_tol_var') else 0.15
 		preview=self.dry_run
 		base_out=(self.cache_dir if preview else (self.out_var.get().strip() or self.in_var.get().strip()))
 		workers=max(1,self.workers_var.get())
