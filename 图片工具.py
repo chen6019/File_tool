@@ -5,7 +5,7 @@
 重命名占位: {name} {ext} {index} {fmt}
 """
 from __future__ import annotations
-import os, sys, threading, queue, shutil, subprocess
+import os, sys, threading, queue, shutil, subprocess, re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import List, Iterable
@@ -302,6 +302,7 @@ class ImageToolApp:
 		self.pattern_var=tk.StringVar(value='{name}_{index}.{fmt}')
 		self.start_var=tk.IntVar(value=1)
 		self.step_var=tk.IntVar(value=1)
+		self.index_width_var=tk.IntVar(value=0)  # 0=不补零
 		self.overwrite_var=tk.StringVar(value=_rev_map(OVERWRITE_MAP)['overwrite'])
 		self.rename_remove_src=tk.BooleanVar(value=False)
 		ttk.Label(rename,text='模式').grid(row=0,column=0,sticky='e')
@@ -310,11 +311,13 @@ class ImageToolApp:
 		sp_start=ttk.Spinbox(rename,from_=1,to=999999,textvariable=self.start_var,width=7); sp_start.grid(row=0,column=3,sticky='w')
 		ttk.Label(rename,text='步长').grid(row=0,column=4,sticky='e')
 		sp_step=ttk.Spinbox(rename,from_=1,to=9999,textvariable=self.step_var,width=5); sp_step.grid(row=0,column=5,sticky='w')
-		ttk.Label(rename,text='覆盖策略').grid(row=0,column=6,sticky='e')
-		cb_over=ttk.Combobox(rename,textvariable=self.overwrite_var,values=list(OVERWRITE_MAP.keys()),width=12,state='readonly'); cb_over.grid(row=0,column=7,sticky='w')
+		ttk.Label(rename,text='宽度').grid(row=0,column=6,sticky='e')
+		sp_indexw=ttk.Spinbox(rename,from_=0,to=10,textvariable=self.index_width_var,width=5); sp_indexw.grid(row=0,column=7,sticky='w')
+		ttk.Label(rename,text='覆盖策略').grid(row=0,column=8,sticky='e')
+		cb_over=ttk.Combobox(rename,textvariable=self.overwrite_var,values=list(OVERWRITE_MAP.keys()),width=12,state='readonly'); cb_over.grid(row=0,column=9,sticky='w')
 		cb_rm_src=ttk.Checkbutton(rename,text='删源',variable=self.rename_remove_src)
-		cb_rm_src.grid(row=0,column=8,sticky='w',padx=(8,0))
-		for i in range(9): rename.columnconfigure(i,weight=0)
+		cb_rm_src.grid(row=0,column=10,sticky='w',padx=(8,0))
+		for i in range(11): rename.columnconfigure(i,weight=0)
 		# 进度
 		ttk.Separator(outer,orient='horizontal').pack(fill='x',pady=(0,6))
 		self.progress=ttk.Progressbar(outer,maximum=100); self.progress.pack(fill='x',pady=(0,4))
@@ -414,7 +417,7 @@ class ImageToolApp:
 		more_tips=[
 			(self.ico_keep_cb,'仅输出原图尺寸 (忽略其它选择)'),
 			(frame_sq,'非方图处理策略 (仅 ICO 格式时有效)'),
-			(ent_pattern,'重命名模式: {name}{ext}{index}{fmt}'),(sp_start,'序号起始'),(sp_step,'序号步长'),(cb_over,'覆盖策略'),(cb_rm_src,'删除源文件(移动而不是复制)')
+			(ent_pattern,'重命名模式: {name}{ext}{index}{fmt} 支持 {index:03} 指定宽度'),(sp_start,'序号起始'),(sp_step,'序号步长'),(sp_indexw,'序号零填充宽度 (0=不填)'),(cb_over,'覆盖策略'),(cb_rm_src,'删除源文件(移动而不是复制)')
 		]
 		tips.extend(more_tips)
 		# 补充自动调整窗口提示
@@ -659,10 +662,22 @@ class ImageToolApp:
 			orig_stem=os.path.splitext(os.path.basename(f))[0]
 			default_basename=f"{orig_stem}.{tgt_fmt}"  # 转换后默认文件名
 			# 计算最终命名
-			name=pattern.replace('{name}',orig_stem)\
-						.replace('{ext}',src_ext)\
-						.replace('{fmt}',tgt_fmt)
-			if '{index}' in name: name=name.replace('{index}',str(idx))
+			name_raw=pattern
+			# 支持 {index:03} / {index:4} 指定宽度; 若无则用 Spinbox 宽度
+			pad_width=self.index_width_var.get() if hasattr(self,'index_width_var') else 0
+			def repl_index(m):
+				w=m.group(1)
+				w_int=0
+				if w:
+					try: w_int=int(w)
+					except ValueError: w_int=0
+				use_w=w_int or pad_width
+				return str(idx).zfill(use_w) if use_w>0 else str(idx)
+			name_raw=re.sub(r'\{index:(\d+)\}', repl_index, name_raw)
+			if '{index}' in name_raw:
+				use_w=pad_width
+				name_raw=name_raw.replace('{index}', str(idx).zfill(use_w) if use_w>0 else str(idx))
+			name=name_raw.replace('{name}',orig_stem).replace('{ext}',src_ext).replace('{fmt}',tgt_fmt)
 			if '.' not in os.path.basename(name): name+=f'.{tgt_fmt}'
 			final_basename=os.path.basename(name)
 			final_path=os.path.join(out_dir,final_basename)
@@ -769,12 +784,30 @@ class ImageToolApp:
 						ok_rename=False; msg_rename=f'命名失败:{e}'
 			with lock:
 				done+=1
-				# 记录转换/复制阶段
-				stage1='CONVERT' if need_convert else 'RENAME'
-				self.q.put(f'LOG\t{stage1}\t{src}\t{convert_path}\t{msg_convert if ok_convert else "失败:"+msg_convert}')
-				# 记录真正重命名阶段
-				if will_rename:
-					self.q.put(f'LOG\tRENAME\t{convert_path}\t{final_path}\t{msg_rename if ok_rename else "失败:"+msg_rename}')
+				# 纯重命名（无转换）且需要重命名时，合并日志为一条
+				if will_rename and not need_convert:
+					# 判定物理操作 (复制/移动)
+					if self.dry_run:
+						op='移动(预览)' if remove_src_on_rename else '复制(预览)'
+					else:
+						op='移动' if remove_src_on_rename else '复制'
+					if ok_convert and ok_rename:
+						info_line=f'重命名 - {op}'
+					else:
+						# 如果任一失败，组合失败信息
+						fail_msg = ('' if ok_convert else ('步骤失败:'+msg_convert)) + (';' if (not ok_convert and not ok_rename) else '') + ('' if ok_rename else ('命名失败:'+msg_rename))
+						info_line=f'失败:{fail_msg or "重命名"}'
+					self.q.put(f'LOG\tRENAME\t{src}\t{final_path}\t{info_line}')
+				else:
+					# 正常记录第一阶段
+					stage1='CONVERT' if need_convert else 'RENAME'
+					self.q.put(f'LOG\t{stage1}\t{src}\t{convert_path}\t{msg_convert if ok_convert else "失败:"+msg_convert}')
+					# 第二阶段命名
+					if will_rename:
+						if ok_rename:
+							self.q.put(f'LOG\tRENAME\t{convert_path}\t{final_path}\t重命名')
+						else:
+							self.q.put(f'LOG\tRENAME\t{convert_path}\t{final_path}\t{msg_rename}')
 				self.q.put(f'PROG {done} {total}')
 		if workers>1:
 			with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -812,6 +845,9 @@ class ImageToolApp:
 						elif stage=='RENAME': stag='STAGE_RENAME'
 						elif '删' in info or '删除' in info: stag='STAGE_DELETE'
 						elif '移动' in info: stag='STAGE_MOVE'
+						# 如果是重命名合并行(含 '重命名 - 移动/复制') 保持 RENAME 颜色
+						if stage=='RENAME' and info.startswith('重命名 - '):
+							stag='STAGE_RENAME'
 						elif '保留' in info: stag='STAGE_KEEP'
 						vals=(stage_disp, os.path.basename(src), os.path.basename(dst), info)
 						row_tags=(src,dst,stag)
