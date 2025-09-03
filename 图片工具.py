@@ -125,6 +125,14 @@ def dhash(im):
 def hamming(a:int,b:int)->int:
 	return (a^b).bit_count()
 
+def _fmt_size(n:int)->str:
+	"""人类可读文件大小"""
+	units=['B','KB','MB','GB','TB']
+	f=float(n); i=0
+	while f>=1024 and i<len(units)-1:
+		f/=1024; i+=1
+	return (f'{f:.2f}{units[i]}' if i>0 else f'{int(f)}{units[i]}')
+
 def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=None):
 	try:
 		with Image.open(src) as im:  # type: ignore
@@ -907,7 +915,12 @@ class ImageToolApp:
 					if scale<1: im=im.resize((int(w*scale),int(h*scale)))
 					photo=ImageTk.PhotoImage(im)
 				label.configure(image=photo,text=''); label._img_ref=photo  # 保持引用
-				info_var.set(f'{w}x{h} {os.path.basename(path)}')
+				try:
+					sz=os.path.getsize(path)
+				except Exception:
+					sz=0
+				size_txt=_fmt_size(sz)
+				info_var.set(f'{w}x{h} {size_txt} {os.path.basename(path)}')
 				return photo.width(), photo.height()
 			except Exception as e:
 				label.configure(text=f'预览失败:{e}',image=''); info_var.set(''); return (0,0)
