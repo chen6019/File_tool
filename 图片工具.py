@@ -262,6 +262,8 @@ class ImageToolApp:
 		self.ico_keep_orig=tk.BooleanVar(value=False)
 		self.ico_size_vars={s:tk.BooleanVar(value=(s in (16,32,48,64))) for s in (16,32,48,64,128,256)}
 		self.ico_square_mode=tk.StringVar(value='fit')  # keep|center|topleft|fit
+		self.classify_ratio_var=tk.BooleanVar(value=False)
+		self.ratio_tol_var=tk.DoubleVar(value=0.03)  # 比例相对误差容差
 		ttk.Label(convert,text='格式').grid(row=0,column=0,sticky='e')
 		cb_fmt=ttk.Combobox(convert,textvariable=self.fmt_var,values=list(FMT_MAP.keys()),width=12,state='readonly'); cb_fmt.grid(row=0,column=1,sticky='w',padx=(0,12))
 		ttk.Label(convert,text='质量').grid(row=0,column=2,sticky='e')
@@ -298,6 +300,15 @@ class ImageToolApp:
 		cb_keep=ttk.Checkbutton(ico_box,text='不改变',variable=self.ico_keep_orig)
 		cb_keep.grid(row=0,column=6,sticky='w',padx=(6,0))
 		self.ico_keep_cb=cb_keep; self.ico_custom_entry=ent_ico; self.ico_label=lbl_ico
+		# 比例分类
+		ratio_frame=ttk.Frame(convert)
+		ratio_frame.grid(row=3,column=0,columnspan=8,sticky='w',pady=(2,2))
+		cb_ratio=ttk.Checkbutton(ratio_frame,text='按比例分类',variable=self.classify_ratio_var)
+		cb_ratio.pack(side='left')
+		ttk.Label(ratio_frame,text='容差').pack(side='left',padx=(8,2))
+		sp_rt=ttk.Spinbox(ratio_frame,from_=0.0,to=0.2,increment=0.005,format='%.3f',width=6,textvariable=self.ratio_tol_var)
+		sp_rt.pack(side='left')
+		self._ratio_widgets=(ratio_frame,cb_ratio,sp_rt)
 		convert.columnconfigure(3,weight=1)
 		for i in range(8):
 			if i!=3: convert.columnconfigure(i,weight=0)
@@ -425,6 +436,9 @@ class ImageToolApp:
 			(frame_sq,'非方图处理策略 (仅 ICO 格式时有效)'),
 			(ent_pattern,'重命名模式: {name}{ext}{index}{fmt} 支持 {index:03} 指定宽度'),(sp_start,'序号起始'),(sp_step,'序号步长'),(sp_indexw,'序号零填充宽度 (0=不填)'),(cb_over,'覆盖策略'),(cb_rm_src,'删除源文件(移动而不是复制)')
 		]
+		# 比例分类提示
+		if 'ratio_frame' in locals():
+			more_tips.append((ratio_frame,'按常见比例(16x9/4x3/21x9等)放入子目录; 支持 {ratio} 占位符; 容差=允许偏差'))
 		tips.extend(more_tips)
 		# 补充自动调整窗口提示
 		if 'cb_auto' in locals():
