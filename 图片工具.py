@@ -228,8 +228,9 @@ class ImageToolApp:
 		self.ratio_tol_var=tk.DoubleVar(value=0.03)
 		self.ratio_custom_var=tk.StringVar(value='')
 		self.ratio_snap_var=tk.BooleanVar(value=False)  # 不匹配是否取最近
-		cb_dedupe=ttk.Checkbutton(opts,text='去重',variable=self.enable_dedupe); cb_dedupe.pack(side='left',padx=2)
+		cb_classify=ttk.Checkbutton(opts,text='分类',variable=self.classify_ratio_var); cb_classify.pack(side='left',padx=2)
 		cb_convert=ttk.Checkbutton(opts,text='转换',variable=self.enable_convert); cb_convert.pack(side='left',padx=2)
+		cb_dedupe=ttk.Checkbutton(opts,text='去重',variable=self.enable_dedupe); cb_dedupe.pack(side='left',padx=2)
 		cb_rename=ttk.Checkbutton(opts,text='重命名',variable=self.enable_rename); cb_rename.pack(side='left',padx=2)
 		ttk.Label(opts,text='线程').pack(side='left',padx=(12,2))
 		self.workers_var=tk.IntVar(value=max(2,(os.cpu_count() or 4)//2))
@@ -237,26 +238,28 @@ class ImageToolApp:
 		btn_start=ttk.Button(opts,text='开始',command=self._start,width=8); btn_start.pack(side='right',padx=2)
 		btn_preview=ttk.Button(opts,text='预览',command=self._preview,width=8); btn_preview.pack(side='right',padx=2)
 		btn_cancel=ttk.Button(opts,text='取消',command=self._cancel,width=8); btn_cancel.pack(side='right',padx=2)
-		# 去重
+		# 分类 (第一阶段)
 		ttk.Separator(outer,orient='horizontal').pack(fill='x',pady=(0,4))
-		dedupe=ttk.LabelFrame(outer,text='去重设置'); dedupe.pack(fill='x',pady=(0,10))
-		self.frame_dedupe=dedupe
-		self.threshold_var=tk.IntVar(value=0)
-		self.keep_var=tk.StringVar(value=_rev_map(KEEP_MAP)['largest'])
-		self.dedup_action_var=tk.StringVar(value=_rev_map(ACTION_MAP)['list'])
-		self.move_dir_var=tk.StringVar()
-		for i in range(11): dedupe.columnconfigure(i,weight=0)
-		ttk.Label(dedupe,text='阈值').grid(row=0,column=0,sticky='e')
-		sp_th=ttk.Spinbox(dedupe,from_=0,to=32,textvariable=self.threshold_var,width=5); sp_th.grid(row=0,column=1,sticky='w',padx=(0,8))
-		ttk.Label(dedupe,text='保留').grid(row=0,column=2,sticky='e')
-		cb_keep=ttk.Combobox(dedupe,textvariable=self.keep_var,values=list(KEEP_MAP.keys()),width=12,state='readonly'); cb_keep.grid(row=0,column=3,sticky='w',padx=(0,8))
-		ttk.Label(dedupe,text='动作').grid(row=0,column=4,sticky='e')
-		cb_action=ttk.Combobox(dedupe,textvariable=self.dedup_action_var,values=list(ACTION_MAP.keys()),width=10,state='readonly'); cb_action.grid(row=0,column=5,sticky='w',padx=(0,8))
-		col_mv=6
-		ttk.Label(dedupe,text='移动到').grid(row=0,column=col_mv,sticky='e')
-		self.move_dir_entry=ttk.Entry(dedupe,textvariable=self.move_dir_var,width=24); self.move_dir_entry.grid(row=0,column=col_mv+1,sticky='w')
-		self.move_dir_btn=ttk.Button(dedupe,text='选',command=self._pick_move_dir,width=4); self.move_dir_btn.grid(row=0,column=col_mv+2,sticky='w',padx=(4,0))
-		# 转换
+		clsf=ttk.LabelFrame(outer,text='比例分类'); clsf.pack(fill='x',pady=(0,10))
+		self.frame_ratio=clsf
+		clsf.columnconfigure(5,weight=1)
+		# 分类内部控件（除启用复选框外可整体禁用）
+		self.cb_ratio_inner_snap=ttk.Checkbutton(clsf,text='不匹配吸附最近',variable=self.ratio_snap_var)
+		cb_tol_label=ttk.Label(clsf,text='容差')
+		sp_rt=ttk.Spinbox(clsf,from_=0.0,to=0.2,increment=0.005,format='%.3f',width=6,textvariable=self.ratio_tol_var)
+		btn_reset_ratio=ttk.Button(clsf,text='恢复默认',width=10,command=lambda: self.ratio_custom_var.set('16:9,16:10,4:3,3:2,5:4,21:9,1:1'))
+		lbl_ratio_input=ttk.Label(clsf,text='自定义(16:9 16x10 ...)')
+		ent_ratio=ttk.Entry(clsf,textvariable=self.ratio_custom_var,width=58)
+		# 保存引用供后续 tooltip / 状态控制
+		self._ratio_sp_rt=sp_rt; self._ratio_ent=ent_ratio; self._ratio_btn_reset=btn_reset_ratio; self._ratio_snap=self.cb_ratio_inner_snap; self._ratio_lbl_input=lbl_ratio_input
+		# 布局
+		cb_tol_label.grid(row=0,column=0,sticky='e')
+		sp_rt.grid(row=0,column=1,sticky='w',padx=(4,12))
+		self.cb_ratio_inner_snap.grid(row=0,column=2,sticky='w')
+		btn_reset_ratio.grid(row=0,column=3,sticky='w',padx=(12,0))
+		lbl_ratio_input.grid(row=1,column=0,sticky='e',pady=(4,0))
+		ent_ratio.grid(row=1,column=1,columnspan=4,sticky='we',pady=(4,2))
+		# 转换 (第二阶段)
 		ttk.Separator(outer,orient='horizontal').pack(fill='x',pady=(0,4))
 		convert=ttk.LabelFrame(outer,text='格式转换'); convert.pack(fill='x',pady=(0,10))
 		self.frame_convert=convert
@@ -305,22 +308,25 @@ class ImageToolApp:
 		cb_keep=ttk.Checkbutton(ico_box,text='不改变',variable=self.ico_keep_orig)
 		cb_keep.grid(row=0,column=6,sticky='w',padx=(6,0))
 		self.ico_keep_cb=cb_keep; self.ico_custom_entry=ent_ico; self.ico_label=lbl_ico
-		# 新: 比例分类区域 (放在转换前, 因执行顺序要求)
-		clsf=ttk.LabelFrame(outer,text='比例分类 (第一阶段)'); clsf.pack(fill='x',pady=(0,10))
-		self.frame_ratio=clsf
-		clsf.columnconfigure(5,weight=1)
-		cb_ratio=ttk.Checkbutton(clsf,text='启用',variable=self.classify_ratio_var)
-		cb_ratio.grid(row=0,column=0,sticky='w',padx=(2,4))
-		ttk.Label(clsf,text='容差').grid(row=0,column=1,sticky='e')
-		sp_rt=ttk.Spinbox(clsf,from_=0.0,to=0.2,increment=0.005,format='%.3f',width=6,textvariable=self.ratio_tol_var)
-		sp_rt.grid(row=0,column=2,sticky='w')
-		cb_snap=ttk.Checkbutton(clsf,text='不匹配吸附最近',variable=self.ratio_snap_var)
-		cb_snap.grid(row=0,column=3,sticky='w',padx=(8,0))
-		btn_reset_ratio=ttk.Button(clsf,text='恢复默认',width=10,command=lambda: self.ratio_custom_var.set('16:9,16:10,4:3,3:2,5:4,21:9,1:1'))
-		btn_reset_ratio.grid(row=0,column=4,sticky='w',padx=(8,0))
-		ttk.Label(clsf,text='自定义(逗号/空格 16:9/16x9)').grid(row=1,column=0,sticky='e',pady=(4,0))
-		ent_ratio=ttk.Entry(clsf,textvariable=self.ratio_custom_var,width=48)
-		ent_ratio.grid(row=1,column=1,columnspan=4,sticky='we',padx=(4,4),pady=(4,2))
+		# 去重 (第三阶段)
+		ttk.Separator(outer,orient='horizontal').pack(fill='x',pady=(0,4))
+		dedupe=ttk.LabelFrame(outer,text='去重设置'); dedupe.pack(fill='x',pady=(0,10))
+		self.frame_dedupe=dedupe
+		self.threshold_var=tk.IntVar(value=0)
+		self.keep_var=tk.StringVar(value=_rev_map(KEEP_MAP)['largest'])
+		self.dedup_action_var=tk.StringVar(value=_rev_map(ACTION_MAP)['list'])
+		self.move_dir_var=tk.StringVar()
+		for i in range(11): dedupe.columnconfigure(i,weight=0)
+		ttk.Label(dedupe,text='阈值').grid(row=0,column=0,sticky='e')
+		sp_th=ttk.Spinbox(dedupe,from_=0,to=32,textvariable=self.threshold_var,width=5); sp_th.grid(row=0,column=1,sticky='w',padx=(0,8))
+		ttk.Label(dedupe,text='保留').grid(row=0,column=2,sticky='e')
+		cb_keep=ttk.Combobox(dedupe,textvariable=self.keep_var,values=list(KEEP_MAP.keys()),width=12,state='readonly'); cb_keep.grid(row=0,column=3,sticky='w',padx=(0,8))
+		ttk.Label(dedupe,text='动作').grid(row=0,column=4,sticky='e')
+		cb_action=ttk.Combobox(dedupe,textvariable=self.dedup_action_var,values=list(ACTION_MAP.keys()),width=10,state='readonly'); cb_action.grid(row=0,column=5,sticky='w',padx=(0,8))
+		col_mv=6
+		ttk.Label(dedupe,text='移动到').grid(row=0,column=col_mv,sticky='e')
+		self.move_dir_entry=ttk.Entry(dedupe,textvariable=self.move_dir_var,width=24); self.move_dir_entry.grid(row=0,column=col_mv+1,sticky='w')
+		self.move_dir_btn=ttk.Button(dedupe,text='选',command=self._pick_move_dir,width=4); self.move_dir_btn.grid(row=0,column=col_mv+2,sticky='w',padx=(4,0))
 		convert.columnconfigure(3,weight=1)
 		for i in range(8):
 			if i!=3: convert.columnconfigure(i,weight=0)
@@ -451,10 +457,10 @@ class ImageToolApp:
 		# 比例分类提示 (新区域)
 		if hasattr(self,'frame_ratio'):
 			more_tips.append((self.frame_ratio,'按常见比例创建子目录或占位符 {ratio}; 自定义: 16:9,4:3 ...; 吸附=选最近比值'))
-			more_tips.append((cb_snap,'未命中容差时是否取最近比值标签'))
-			more_tips.append((sp_rt,'相对误差容差, 比如 0.03=±3%'))
-			more_tips.append((ent_ratio,'自定义列表, 支持 16:9 / 16x9 形式'))
-			more_tips.append((cb_ratio,'启用后单文件模式自动跳过'))
+			if hasattr(self,'_ratio_snap'): more_tips.append((self._ratio_snap,'未命中容差时是否取最近比值标签'))
+			if hasattr(self,'_ratio_sp_rt'): more_tips.append((self._ratio_sp_rt,'相对误差容差, 比如 0.03=±3%'))
+			if hasattr(self,'_ratio_ent'): more_tips.append((self._ratio_ent,'自定义列表, 支持 16:9 / 16x9 形式'))
+			# 顶部启用按钮为 cb_classify (在 opts), 这里不重复
 		tips.extend(more_tips)
 		# 补充自动调整窗口提示
 		if 'cb_auto' in locals():
