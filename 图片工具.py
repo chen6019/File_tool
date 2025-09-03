@@ -1,8 +1,4 @@
 """图片工具
-单窗口批处理: 图片 去重 / 转换 / 重命名。
-
-流程: (可选)去重 -> (可选)转换/重命名
-重命名占位: {name} {ext} {index} {fmt}
 """
 from __future__ import annotations
 import os, sys, threading, queue, shutil, subprocess, re, hashlib
@@ -1128,7 +1124,6 @@ class ImageToolApp:
 		process_same=self.process_same_var.get(); quality=self.quality_var.get(); png3=self.png3_var.get()
 		remove_src_on_convert=self.convert_remove_src.get()
 		workers=max(1,self.workers_var.get())
-		# 实际输出根目录 (真实或预览 final)
 		real_out=self.out_var.get().strip() or self.in_var.get().strip()
 		out_dir = (self.cache_final_dir or self.cache_dir) if self.dry_run else real_out
 		ico_sizes=None
@@ -1147,17 +1142,17 @@ class ImageToolApp:
 						if 1<=v<=1024: chosen.append(v)
 			if chosen:
 				ico_sizes=sorted(set(chosen))[:10]
-		converted=[]
 		preview=self.dry_run
-		# 若来自分类, 需要保留分类子目录结构
 		class_root = (self.cache_dir if preview else real_out)
-		for f in files:
-			if self.stop_flag.is_set(): break
+		results=[None]*len(files)
+		lock=threading.Lock(); done=0; total=len(files)
+		def do_one(i,f):
+			nonlocal done
+			if self.stop_flag.is_set(): return
 			src_ext=norm_ext(f)
 			tgt_fmt=fmt if self.enable_convert.get() else src_ext
 			need_convert=self.enable_convert.get() and (src_ext!=fmt or process_same)
 			if not need_convert:
-				# 复制原相对结构到 out_dir (仅预览时需要确保存在对应子目录; 实际不处理)
 				if preview:
 					try:
 						rel_dir=os.path.relpath(os.path.dirname(f), class_root)
@@ -1165,25 +1160,36 @@ class ImageToolApp:
 						dst_dir=os.path.join(out_dir, rel_dir)
 						os.makedirs(dst_dir, exist_ok=True)
 						dest_placeholder=os.path.join(dst_dir, os.path.basename(f))
-						if not os.path.exists(dest_placeholder):
-							shutil.copy2(f, dest_placeholder)
-					except Exception:
-						pass
-				converted.append(f); continue
+						if not os.path.exists(dest_placeholder): shutil.copy2(f, dest_placeholder)
+					except Exception: pass
+				with lock:
+					results[i]=f; done+=1; self.q.put(f'PROG {done} {total}')
+				return
 			basename=os.path.splitext(os.path.basename(f))[0]
 			out_name=f"{basename}.{tgt_fmt}"
-			# 按原相对目录放入 out_dir
 			rel_dir=os.path.relpath(os.path.dirname(f), class_root)
 			if rel_dir=='.': rel_dir=''
 			dest_dir=os.path.join(out_dir, rel_dir)
-			os.makedirs(dest_dir, exist_ok=True)
+			try: os.makedirs(dest_dir, exist_ok=True)
+			except Exception: pass
 			dest=os.path.join(dest_dir,out_name)
 			ok,msg=convert_one(f,dest,tgt_fmt,quality if tgt_fmt in ('jpg','png','webp') else None,png3 if tgt_fmt=='png' else False,ico_sizes if tgt_fmt=='ico' else None,self.ico_square_mode_code() if tgt_fmt=='ico' else None)
-			self.q.put(f'LOG\tCONVERT\t{f}\t{dest}\t{"转换" if ok else "转换失败"}')
 			if ok and remove_src_on_convert and not preview:
-				ok_del,_m=safe_delete(f)
-			converted.append(dest if ok else f)
-		return converted
+				try: safe_delete(f)
+				except Exception: pass
+			with lock:
+				self.q.put(f'LOG\tCONVERT\t{f}\t{dest}\t{"转换" if ok else "转换失败"}')
+				results[i]= dest if ok else f
+				done+=1; self.q.put(f'PROG {done} {total}')
+		if workers>1 and len(files)>1:
+			with ThreadPoolExecutor(max_workers=workers) as ex:
+				futs=[ex.submit(do_one,i,f) for i,f in enumerate(files)]
+				for _ in as_completed(futs):
+					if self.stop_flag.is_set(): break
+		else:
+			for i,f in enumerate(files):
+				do_one(i,f)
+		return [r for r in results if r]
 
 	def _rename_stage_only(self, files:list[str]):
 		pattern=self.pattern_var.get().strip()
