@@ -565,7 +565,18 @@ class ImageToolApp:
 		self.stop_flag.set(); self.status_var.set('请求取消...')
 
 	def _open_last_out(self):
-		path=self.last_out_dir or self.out_var.get().strip()
+		# 预览模式下无条件优先打开缓存目录 (更符合“查看预览结果”需求)
+		if self.dry_run:
+			try:
+				self._ensure_cache_dir()
+			except Exception:
+				pass
+			if self.cache_dir and os.path.isdir(self.cache_dir):
+				path=self.cache_dir
+			else:
+				path=self.last_out_dir or self.out_var.get().strip()
+		else:
+			path=self.last_out_dir or self.out_var.get().strip()
 		if not path:
 			self.status_var.set('无输出目录'); return
 		if not os.path.isdir(path):
