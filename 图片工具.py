@@ -220,9 +220,9 @@ class ImageToolApp:
 		btn_open_out=ttk.Button(io,text='打开',command=self._open_last_out,width=6); btn_open_out.grid(row=0,column=8,padx=(4,0))
 		# 功能
 		opts=ttk.Frame(outer); opts.pack(fill='x',pady=(0,8))
-		self.enable_dedupe=tk.BooleanVar(value=True)
-		self.enable_convert=tk.BooleanVar(value=True)
-		self.enable_rename=tk.BooleanVar(value=True)
+		self.enable_dedupe=tk.BooleanVar(value=False)
+		self.enable_convert=tk.BooleanVar(value=False)
+		self.enable_rename=tk.BooleanVar(value=False)
 		# 比例分类配置 (新独立区域)
 		self.classify_ratio_var=tk.BooleanVar(value=False)
 		self.ratio_tol_var=tk.DoubleVar(value=0.03)
