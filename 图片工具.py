@@ -259,6 +259,26 @@ class ImageToolApp:
 		btn_reset_ratio.grid(row=0,column=3,sticky='w',padx=(12,0))
 		lbl_ratio_input.grid(row=1,column=0,sticky='e',pady=(4,0))
 		ent_ratio.grid(row=1,column=1,columnspan=4,sticky='we',pady=(4,2))
+		# 预设比例按钮行
+		preset_frame=ttk.Frame(clsf)
+		preset_frame.grid(row=2,column=0,columnspan=5,sticky='w',pady=(2,2))
+		presets=['16:9','16:10','4:3','3:2','5:4','21:9','1:1']
+		def _toggle_ratio(val:str):
+			cur=self.ratio_custom_var.get().replace('；',';').replace('，',',').replace(';',',')
+			parts=[p.strip() for p in cur.split(',') if p.strip()]
+			lower_map={p.lower():p for p in parts}
+			key=val.lower()
+			if key in lower_map:
+				# 移除
+				parts=[p for p in parts if p.lower()!=key]
+			else:
+				parts.append(val)
+			self.ratio_custom_var.set(','.join(parts))
+		for r in presets:
+			btn=ttk.Button(preset_frame,text=r,width=6,command=lambda v=r: _toggle_ratio(v))
+			btn.pack(side='left',padx=1)
+		btn_clear=ttk.Button(preset_frame,text='清空',width=6,command=lambda: self.ratio_custom_var.set(''))
+		btn_clear.pack(side='left',padx=(8,0))
 		# 转换 (第二阶段)
 		ttk.Separator(outer,orient='horizontal').pack(fill='x',pady=(0,4))
 		convert=ttk.LabelFrame(outer,text='格式转换'); convert.pack(fill='x',pady=(0,10))
