@@ -4,6 +4,7 @@
 """
 import os, sys, threading, queue, tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+from .config import RATIO_PRESETS, KEEP_MODE_OPTIONS, ACTION_OPTIONS, OVERWRITE_OPTIONS
 
 # 兼容包方式与直接脚本运行
 try:  # 包内相对导入
@@ -84,68 +85,28 @@ class ModularApp:
             ttk.Checkbutton(bar,text=txt,variable=var).pack(side='left',padx=2)
         ttk.Button(bar,text='预览',command=lambda: self._start(True)).pack(side='right',padx=4)
         ttk.Button(bar,text='开始',command=lambda: self._start(False)).pack(side='right',padx=4)
-        # 分类参数
-        clsf=ttk.LabelFrame(outer,text='分类参数'); clsf.pack(fill='x',pady=4)
-        self._frame_classify=clsf
-        lbl_tol=ttk.Label(clsf,text='容差'); lbl_tol.grid(row=0,column=0,sticky='e')
-        ent_tol=ttk.Entry(clsf,textvariable=self.classify_tol,width=6); ent_tol.grid(row=0,column=1)
-        cb_snap=ttk.Checkbutton(clsf,text='吸附最近',variable=self.classify_snap); cb_snap.grid(row=0,column=2,padx=4)
-        ttk.Label(clsf,text='自定义').grid(row=0,column=3,sticky='e')
-        ent_rat=ttk.Entry(clsf,textvariable=self.classify_custom,width=40); ent_rat.grid(row=0,column=4,sticky='we')
-        clsf.columnconfigure(4,weight=1)
-        # 预设按钮行
-        preset_bar=ttk.Frame(clsf); preset_bar.grid(row=1,column=0,columnspan=5,sticky='w',pady=(2,0))
-        self._preset_buttons=[]
-        def toggle_ratio(val:str):
-            cur=self.classify_custom.get().replace('；',';').replace('，',',').replace(';',',')
-            parts=[p.strip() for p in cur.split(',') if p.strip()]
-            low={p.lower():p for p in parts}
-            k=val.lower()
-            if k in low:
-                parts=[p for p in parts if p.lower()!=k]
-            else:
-                parts.append(val)
-            self.classify_custom.set(','.join(parts))
-        for r in self.ratio_presets:
-            b=ttk.Button(preset_bar,text=r,width=6,command=lambda v=r: toggle_ratio(v)); b.pack(side='left',padx=1)
-            self._preset_buttons.append(b)
-        btn_clear=ttk.Button(preset_bar,text='清空',width=6,command=lambda: self.classify_custom.set(''))
-        btn_clear.pack(side='left',padx=(8,0))
-        self._preset_btn_clear=btn_clear
-        # 转换参数
-        cv=ttk.LabelFrame(outer,text='转换参数'); cv.pack(fill='x',pady=4)
-        ttk.Label(cv,text='格式').grid(row=0,column=0,sticky='e')
-        ttk.Combobox(cv,textvariable=self.fmt_var,values=['jpg','png','webp','ico','gif'],width=8,state='readonly').grid(row=0,column=1,sticky='w',padx=(0,6))
-        ttk.Label(cv,text='质量').grid(row=0,column=2,sticky='e')
-        ttk.Spinbox(cv,from_=1,to=100,textvariable=self.quality_var,width=5).grid(row=0,column=3,sticky='w')
-        ttk.Checkbutton(cv,text='同格式也重存',variable=self.process_same).grid(row=0,column=4,sticky='w',padx=4)
-        ttk.Checkbutton(cv,text='PNG压缩',variable=self.png3).grid(row=0,column=5,sticky='w')
-        ttk.Checkbutton(cv,text='删源',variable=self.remove_src_convert).grid(row=0,column=6,sticky='w',padx=4)
-        ttk.Label(cv,text='ICO尺寸').grid(row=1,column=0,sticky='e',pady=(4,0))
-        ttk.Entry(cv,textvariable=self.ico_sizes_var,width=24).grid(row=1,column=1,sticky='w',pady=(4,0))
-        ttk.Checkbutton(cv,text='保留原尺寸',variable=self.ico_keep_orig).grid(row=1,column=2,sticky='w',pady=(4,0))
-        ttk.Label(cv,text='非方:').grid(row=1,column=3,sticky='e')
-        for i,(txt,val) in enumerate([('保持','keep'),('中心','center'),('左上','topleft'),('填充','fit')]):
-            ttk.Radiobutton(cv,text=txt,variable=self.ico_square,value=val).grid(row=1,column=4+i,sticky='w')
-        # 去重参数
-        dd=ttk.LabelFrame(outer,text='去重参数'); dd.pack(fill='x',pady=4)
-        ttk.Label(dd,text='阈值').grid(row=0,column=0,sticky='e'); ttk.Spinbox(dd,from_=0,to=32,textvariable=self.th_var,width=5).grid(row=0,column=1,sticky='w')
-        ttk.Label(dd,text='保留').grid(row=0,column=2,sticky='e')
-        ttk.Combobox(dd,textvariable=self.keep_mode_var,values=['最大分辨率','最大文件','最新','最旧','首个'],width=10,state='readonly').grid(row=0,column=3,sticky='w',padx=(0,6))
-        ttk.Label(dd,text='动作').grid(row=0,column=4,sticky='e')
-        ttk.Combobox(dd,textvariable=self.action_var,values=['仅列出','删除重复','移动重复'],width=10,state='readonly').grid(row=0,column=5,sticky='w')
-        ttk.Label(dd,text='移动到').grid(row=0,column=6,sticky='e')
+        # 分类参数(拆分)
+        from .ui.section_classify import ClassifySection
+        cls_vars={'tol':self.classify_tol,'snap':self.classify_snap,'custom':self.classify_custom}
+        self.classify_section=ClassifySection(outer,cls_vars)
+        self._frame_classify=self.classify_section.widget()
+        self.classify_section.widget().pack(fill='x',pady=4)
+        # 转换参数(拆分)
+        from .ui.section_convert import ConvertSection
+        cv_vars={'fmt':self.fmt_var,'quality':self.quality_var,'same':self.process_same,'png3':self.png3,'rm_src':self.remove_src_convert,'ico_sizes':self.ico_sizes_var,'ico_keep':self.ico_keep_orig,'ico_square':self.ico_square}
+        self.convert_section=ConvertSection(outer,cv_vars)
+        self.convert_section.widget().pack(fill='x',pady=4)
+        # 去重参数(拆分)
+        from .ui.section_dedupe import DedupeSection
         self.move_dir_var=tk.StringVar()
-        ttk.Entry(dd,textvariable=self.move_dir_var,width=24).grid(row=0,column=7,sticky='w')
-        ttk.Button(dd,text='选',command=self._pick_move_dir,width=4).grid(row=0,column=8,sticky='w',padx=(4,0))
-        rename_box=ttk.LabelFrame(outer,text='重命名'); rename_box.pack(fill='x',pady=4)
-        ttk.Label(rename_box,text='模式').grid(row=0,column=0,sticky='e')
-        ttk.Entry(rename_box,textvariable=self.pattern_var,width=42).grid(row=0,column=1,sticky='w')
-        ttk.Label(rename_box,text='起始').grid(row=0,column=2,sticky='e'); ttk.Entry(rename_box,textvariable=self.start_var,width=6).grid(row=0,column=3)
-        ttk.Label(rename_box,text='步长').grid(row=0,column=4,sticky='e'); ttk.Entry(rename_box,textvariable=self.step_var,width=4).grid(row=0,column=5)
-        ttk.Label(rename_box,text='宽度').grid(row=0,column=6,sticky='e'); ttk.Entry(rename_box,textvariable=self.width_var,width=4).grid(row=0,column=7)
-        ttk.Label(rename_box,text='覆盖').grid(row=0,column=8,sticky='e')
-        ttk.Combobox(rename_box,textvariable=self.overwrite_var,values=['覆盖原有','跳过已存在','自动改名'],width=10,state='readonly').grid(row=0,column=9,sticky='w')
+        dd_vars={'th':self.th_var,'keep':self.keep_mode_var,'action':self.action_var,'move_dir':self.move_dir_var,'pick_move_cb':self._pick_move_dir}
+        self.dedupe_section=DedupeSection(outer,dd_vars)
+        self.dedupe_section.widget().pack(fill='x',pady=4)
+        # 重命名(拆分)
+        from .ui.section_rename import RenameSection
+        rn_vars={'pattern':self.pattern_var,'start':self.start_var,'step':self.step_var,'width':self.width_var,'overwrite':self.overwrite_var}
+        self.rename_section=RenameSection(outer,rn_vars)
+        self.rename_section.widget().pack(fill='x',pady=4)
         # 日志视图 (拆分组件)
         from .ui.log_view import LogView
         log_frame=ttk.Frame(outer); log_frame.pack(fill='both',expand=True,pady=(6,0))
