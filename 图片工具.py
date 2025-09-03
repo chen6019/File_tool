@@ -557,8 +557,12 @@ class ImageToolApp:
 			if self.enable_dedupe.get():
 				kept=self._dedupe_stage(kept)
 				if self.stop_flag.is_set(): return
+			converted=kept
 			if self.enable_convert.get() or self.enable_rename.get():
-				self._convert_rename_stage(kept)
+				converted=self._convert_rename_stage(kept)
+			# 比例分类独立阶段
+			if self.classify_ratio_var.get():
+				self._ratio_classify_stage(converted)
 			self.q.put('STATUS 预览完成' if self.dry_run else 'STATUS 完成')
 		except Exception as e:
 			self.q.put(f'STATUS 失败: {e}')
@@ -685,8 +689,11 @@ class ImageToolApp:
 			need_convert=self.enable_convert.get() and (src_ext!=fmt or process_same)
 			orig_stem=os.path.splitext(os.path.basename(f))[0]
 			default_basename=f"{orig_stem}.{tgt_fmt}"  # 转换后默认文件名
-			# 计算最终命名
-			name_raw=pattern
+			# 计算最终命名 (仅当启用重命名时使用 pattern, 否则保持默认)
+			if not self.enable_rename.get():
+				name_raw=default_basename
+			else:
+				name_raw=pattern
 			# 支持 {index:03} / {index:4} 指定宽度; 若无则用 Spinbox 宽度
 			pad_width=self.index_width_var.get() if hasattr(self,'index_width_var') else 0
 			def repl_index(m):
@@ -733,7 +740,7 @@ class ImageToolApp:
 			tasks.append((f,need_convert,tgt_fmt,convert_path,final_path,will_rename,convert_basename,final_basename,idx))
 			idx+=step
 		total=len(tasks); self.q.put(f'STATUS 转换/重命名 共{total}')
-		done=0; lock=threading.Lock()
+		done=0; lock=threading.Lock(); final_paths=[]
 		def job(spec):
 			nonlocal done
 			src,need_convert,tgt,convert_path,final_path,will_rename,convert_basename,final_basename,_idx=spec
@@ -837,6 +844,9 @@ class ImageToolApp:
 						else:
 							self.q.put(f'LOG\tRENAME\t{convert_path}\t{final_path}\t{msg_rename}')
 				self.q.put(f'PROG {done} {total}')
+				# 成功的最终文件加入列表 (失败转换不加入)
+				if (not need_convert or ok_convert) and (not will_rename or ok_rename):
+					final_paths.append(final_path if not self.dry_run else final_path)
 		if workers>1:
 			with ThreadPoolExecutor(max_workers=workers) as ex:
 				futs=[ex.submit(job,t) for t in tasks]
@@ -844,6 +854,68 @@ class ImageToolApp:
 					if self.stop_flag.is_set(): break
 		else:
 			for t in tasks: job(t)
+		return final_paths
+
+	def _ratio_classify_stage(self, file_paths:List[str]):
+		"""按常见比例分类: 若文件名含 {ratio} 占位则替换; 否则移动到子目录。"""
+		COMMON=[(16,9,'16x9'),(16,10,'16x10'),(4,3,'4x3'),(1,1,'1x1'),(21,9,'21x9'),(3,2,'3x2'),(5,4,'5x4')]
+		tol=self.ratio_tol_var.get() if hasattr(self,'ratio_tol_var') else 0.03
+		preview=self.dry_run
+		base_out=self.cache_dir if preview else (self.out_var.get().strip() or self.in_var.get().strip())
+		result_paths=[]
+		for p in file_paths:
+			if self.stop_flag.is_set(): break
+			if not os.path.isfile(p):
+				continue
+			try:
+				with Image.open(p) as im:
+					w,h=im.size
+			except Exception as e:
+				self.q.put(f'LOG\tRENAME\t{p}\t{p}\t比例分类失败:读图失败')
+				continue
+			if h==0:
+				continue
+			ratio=w/h; label='other'
+			for rw,rh,lab in COMMON:
+				ideal=rw/rh
+				if ideal!=0 and abs(ratio-ideal)/ideal <= tol:
+					label=lab; break
+			base=os.path.basename(p)
+			if '{ratio}' in base:
+				new_base=base.replace('{ratio}',label)
+				dest=os.path.join(os.path.dirname(p), new_base)
+			else:
+				dir_ratio=os.path.join(base_out,label)
+				os.makedirs(dir_ratio,exist_ok=True)
+				dest=os.path.join(dir_ratio, base)
+			if p==dest:
+				result_paths.append(p); continue
+			if os.path.exists(dest):
+				# 解决冲突
+				if not preview:
+					dest=next_non_conflict(dest)
+				else:
+					# 预览冲突简易处理
+					base_no,ext=os.path.splitext(dest); i=1
+					alt=f"{base_no}_{i}{ext}"
+					while os.path.exists(alt):
+						i+=1; alt=f"{base_no}_{i}{ext}"
+					dest=alt
+			try:
+				if preview:
+					shutil.copy2(p,dest)
+					if p!=dest and os.path.exists(p):
+						os.remove(p)
+				else:
+					# 移动或重命名
+					os.replace(p,dest)
+				act='重命名' if '{ratio}' in base else '移动'
+				self.q.put(f'LOG\tRENAME\t{p}\t{dest}\t比例分类 {act}->{label}')
+				result_paths.append(dest)
+			except Exception as e:
+				self.q.put(f'LOG\tRENAME\t{p}\t{p}\t比例分类失败:{e}')
+				result_paths.append(p)
+		return result_paths
 
 	# 队列 + 预览
 	def _drain(self):
