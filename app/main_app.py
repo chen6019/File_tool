@@ -146,8 +146,11 @@ class ModularApp:
         ttk.Label(rename_box,text='宽度').grid(row=0,column=6,sticky='e'); ttk.Entry(rename_box,textvariable=self.width_var,width=4).grid(row=0,column=7)
         ttk.Label(rename_box,text='覆盖').grid(row=0,column=8,sticky='e')
         ttk.Combobox(rename_box,textvariable=self.overwrite_var,values=['覆盖原有','跳过已存在','自动改名'],width=10,state='readonly').grid(row=0,column=9,sticky='w')
+        # 日志视图 (拆分组件)
+        from .ui.log_view import LogView
         log_frame=ttk.Frame(outer); log_frame.pack(fill='both',expand=True,pady=(6,0))
-        self.log=tk.Listbox(log_frame,height=16); self.log.pack(fill='both',expand=True)
+        self.log_view=LogView(log_frame)
+        self.log_view.widget().pack(fill='both',expand=True)
         # 状态刷新
         for v in (self.enable_classify,self.enable_convert,self.enable_dedupe,self.enable_rename):
             v.trace_add('write', lambda *a: self._update_states())
@@ -234,7 +237,7 @@ class ModularApp:
     def _drain(self):
         try:
             while True:
-                m=self.q.get_nowait(); self.log.insert('end',m); self.log.yview_moveto(1)
+                m=self.q.get_nowait(); self.log_view.add_raw(m)
         except queue.Empty:
             pass
         self.root.after(120,self._drain)
