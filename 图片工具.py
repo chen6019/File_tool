@@ -251,7 +251,7 @@ class ImageToolApp:
 		lbl_ratio_input=ttk.Label(clsf,text='自定义(16:9 16x10 ...)')
 		ent_ratio=ttk.Entry(clsf,textvariable=self.ratio_custom_var,width=58)
 		# 保存引用供后续 tooltip / 状态控制
-		self._ratio_sp_rt=sp_rt; self._ratio_ent=ent_ratio; self._ratio_btn_reset=btn_reset_ratio; self._ratio_snap=self.cb_ratio_inner_snap; self._ratio_lbl_input=lbl_ratio_input
+		self._ratio_sp_rt=sp_rt; self._ratio_ent=ent_ratio; self._ratio_btn_reset=btn_reset_ratio; self._ratio_snap=self.cb_ratio_inner_snap; self._ratio_lbl_input=lbl_ratio_input; self._ratio_lbl_tol=cb_tol_label
 		# 布局
 		cb_tol_label.grid(row=0,column=0,sticky='e')
 		sp_rt.grid(row=0,column=1,sticky='w',padx=(4,12))
@@ -274,11 +274,14 @@ class ImageToolApp:
 			else:
 				parts.append(val)
 			self.ratio_custom_var.set(','.join(parts))
+		self._ratio_preset_buttons=[]
 		for r in presets:
 			btn=ttk.Button(preset_frame,text=r,width=6,command=lambda v=r: _toggle_ratio(v))
 			btn.pack(side='left',padx=1)
+			self._ratio_preset_buttons.append(btn)
 		btn_clear=ttk.Button(preset_frame,text='清空',width=6,command=lambda: self.ratio_custom_var.set(''))
 		btn_clear.pack(side='left',padx=(8,0))
+		self._ratio_btn_clear=btn_clear
 		# 转换 (第二阶段)
 		ttk.Separator(outer,orient='horizontal').pack(fill='x',pady=(0,4))
 		convert=ttk.LabelFrame(outer,text='格式转换'); convert.pack(fill='x',pady=(0,10))
@@ -1352,11 +1355,20 @@ class ImageToolApp:
 		try:
 			if hasattr(self,'frame_ratio') and self.frame_ratio:
 				enabled=self.classify_ratio_var.get()
-				for widget in (getattr(self,'_ratio_sp_rt',None), getattr(self,'_ratio_ent',None), getattr(self,'_ratio_btn_reset',None), getattr(self,'_ratio_snap',None), getattr(self,'_ratio_lbl_input',None)):
+				# 基础控件
+				for widget in (getattr(self,'_ratio_sp_rt',None), getattr(self,'_ratio_ent',None), getattr(self,'_ratio_btn_reset',None), getattr(self,'_ratio_snap',None), getattr(self,'_ratio_lbl_input',None), getattr(self,'_ratio_lbl_tol',None)):
 					if widget:
 						state='normal' if enabled else 'disabled'
 						try: widget.configure(state=state)
 						except Exception: pass
+				# 预设按钮及清空
+				if hasattr(self,'_ratio_preset_buttons'):
+					for b in self._ratio_preset_buttons:
+						try: b.configure(state='normal' if enabled else 'disabled')
+						except Exception: pass
+				if hasattr(self,'_ratio_btn_clear') and self._ratio_btn_clear:
+					try: self._ratio_btn_clear.configure(state='normal' if enabled else 'disabled')
+					except Exception: pass
 		except Exception:
 			pass
 		if hasattr(self,'frame_dedupe') and self.frame_dedupe:
