@@ -235,7 +235,8 @@ class ImageToolApp:
 		cb_dedupe=ttk.Checkbutton(opts,text='去重',variable=self.enable_dedupe); cb_dedupe.pack(side='left',padx=2)
 		cb_rename=ttk.Checkbutton(opts,text='重命名',variable=self.enable_rename); cb_rename.pack(side='left',padx=2)
 		ttk.Label(opts,text='线程').pack(side='left',padx=(12,2))
-		self.workers_var=tk.IntVar(value=max(2,(os.cpu_count() or 4)//2))
+		# 默认线程数 16
+		self.workers_var=tk.IntVar(value=16)
 		sp_workers=ttk.Spinbox(opts,from_=1,to=64,textvariable=self.workers_var,width=5); sp_workers.pack(side='left')
 		btn_start=ttk.Button(opts,text='开始',command=self._start,width=8); btn_start.pack(side='right',padx=2)
 		btn_preview=ttk.Button(opts,text='预览',command=self._preview,width=8); btn_preview.pack(side='right',padx=2)
@@ -292,7 +293,8 @@ class ImageToolApp:
 		self.quality_var=tk.IntVar(value=100)
 		self.process_same_var=tk.BooleanVar(value=False)
 		self.png3_var=tk.BooleanVar(value=False)
-		self.convert_remove_src=tk.BooleanVar(value=False)
+		# 默认转换后删源
+		self.convert_remove_src=tk.BooleanVar(value=True)
 		self.ico_sizes_var=tk.StringVar(value='')  # 自定义尺寸输入
 		self.ico_keep_orig=tk.BooleanVar(value=False)
 		self.ico_size_vars={s:tk.BooleanVar(value=(s in (16,32,48,64))) for s in (16,32,48,64,128,256)}
@@ -337,9 +339,11 @@ class ImageToolApp:
 		ttk.Separator(outer,orient='horizontal').pack(fill='x',pady=(0,4))
 		dedupe=ttk.LabelFrame(outer,text='去重设置'); dedupe.pack(fill='x',pady=(0,10))
 		self.frame_dedupe=dedupe
-		self.threshold_var=tk.IntVar(value=0)
+		# 去重阈值默认 3
+		self.threshold_var=tk.IntVar(value=3)
 		self.keep_var=tk.StringVar(value=_rev_map(KEEP_MAP)['largest'])
-		self.dedup_action_var=tk.StringVar(value=_rev_map(ACTION_MAP)['list'])
+		# 去重动作默认 删除重复
+		self.dedup_action_var=tk.StringVar(value=_rev_map(ACTION_MAP)['delete'])
 		self.move_dir_var=tk.StringVar()
 		for i in range(11): dedupe.columnconfigure(i,weight=0)
 		ttk.Label(dedupe,text='阈值').grid(row=0,column=0,sticky='e')
@@ -362,9 +366,11 @@ class ImageToolApp:
 		self.pattern_var=tk.StringVar(value='{name}_{index}.{fmt}')
 		self.start_var=tk.IntVar(value=1)
 		self.step_var=tk.IntVar(value=1)
-		self.index_width_var=tk.IntVar(value=0)  # 0=不补零
+		# 默认序号宽度 3
+		self.index_width_var=tk.IntVar(value=3)  # 0=不补零
 		self.overwrite_var=tk.StringVar(value=_rev_map(OVERWRITE_MAP)['overwrite'])
-		self.rename_remove_src=tk.BooleanVar(value=False)
+		# 重命名默认删源(移动方式)
+		self.rename_remove_src=tk.BooleanVar(value=True)
 		ttk.Label(rename,text='模式').grid(row=0,column=0,sticky='e')
 		ent_pattern=ttk.Entry(rename,textvariable=self.pattern_var,width=42); ent_pattern.grid(row=0,column=1,sticky='w',padx=(0,8))
 		ttk.Label(rename,text='起始').grid(row=0,column=2,sticky='e')
