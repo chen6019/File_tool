@@ -5,7 +5,7 @@
 重命名占位: {name} {ext} {index} {fmt}
 """
 from __future__ import annotations
-import os, sys, threading, queue, shutil, subprocess, re
+import os, sys, threading, queue, shutil, subprocess, re, hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import List, Iterable
@@ -62,6 +62,7 @@ STAGE_MAP_DISPLAY={
 	'DEDUP':'去重',
 	'CONVERT':'转换',
 	'RENAME':'重命名',
+	'CLASSIFY':'分类',
 }
 
 def _rev_map(mp:dict):
@@ -202,6 +203,8 @@ class ImageToolApp:
 		self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 		self.cache_trash_dir=None  # 预览模拟回收站目录
 		self.cache_final_dir=None  # 预览最终结果目录 (_final)
+		self._last_preview_signature=None
+		self._last_preview_files=None  # list of (path,mtime,size)
 
 	# ---------------- UI ----------------
 	def _build(self):
@@ -419,6 +422,7 @@ class ImageToolApp:
 		self.log.tag_configure('STAGE_DEDUPE', background='#FFF5E6')      # 淡橙 去重
 		self.log.tag_configure('STAGE_CONVERT', background='#E6F5FF')     # 淡蓝 转换
 		self.log.tag_configure('STAGE_RENAME', background='#F0E6FF')      # 淡紫 重命名
+		self.log.tag_configure('STAGE_CLASSIFY', background='#E6FFE6')    # 淡绿 分类
 		self.log.tag_configure('STAGE_DELETE', background='#FFE6E6')      # 淡红 删除
 		self.log.tag_configure('STAGE_MOVE', background='#E6FFE6')        # 淡绿 移动
 		self.log.tag_configure('STAGE_KEEP', background='#F5F5F5')        # 灰白 保留
@@ -523,9 +527,15 @@ class ImageToolApp:
 			messagebox.showinfo('提示','任务运行中'); return
 		self.dry_run=dry_run
 		# 在开始时清除缓存
-		self._clear_cache()
 		if dry_run:
+			self._clear_cache()
 			self._ensure_cache_dir()
+		else:
+			# 尝试快速提交
+			if self._maybe_fast_commit():
+				return
+			# 非快速路径需清除旧缓存
+			self._clear_cache()
 		inp=self.in_var.get().strip()
 		if not inp: self.status_var.set('未选择输入'); return
 		self.single_file_mode=False
@@ -579,9 +589,14 @@ class ImageToolApp:
 		# 同时建立模拟回收站目录
 		self.cache_trash_dir=os.path.join(self.cache_dir,'_trash')
 		os.makedirs(self.cache_trash_dir, exist_ok=True)
-		# 建立最终结果目录
-		self.cache_final_dir=os.path.join(self.cache_dir,'_final')
-		os.makedirs(self.cache_final_dir, exist_ok=True)
+		# 建立最终结果目录（避免嵌套 _final/_final）
+		candidate_final=os.path.join(self.cache_dir,'_final')
+		if os.path.basename(self.cache_dir) == '_final':  # 已经指向 final
+			self.cache_final_dir=self.cache_dir
+		else:
+			self.cache_final_dir=candidate_final
+		if not os.path.exists(self.cache_final_dir):
+			os.makedirs(self.cache_final_dir, exist_ok=True)
 
 	def _clear_cache(self):
 		if self.cache_dir and os.path.exists(self.cache_dir):
@@ -611,6 +626,16 @@ class ImageToolApp:
 			# 1 分类 (仅多文件; 单文件跳过) 提前, 影响后续路径结构
 			if not self.single_file_mode and self.classify_ratio_var.get():
 				files=self._ratio_classify_stage(files)
+				# 预览时把分类结果同步到 _final，便于后续快速提交（若没有后续阶段）
+				if self.dry_run and self.cache_final_dir:
+					for p in files:
+						if p.startswith(self.cache_dir):
+							rel=os.path.relpath(p,self.cache_dir)
+							target=os.path.join(self.cache_final_dir, rel)
+							os.makedirs(os.path.dirname(target),exist_ok=True)
+							if not os.path.exists(target):
+								try: shutil.copy2(p,target)
+								except Exception: pass
 			if self.stop_flag.is_set(): return
 			# 2 转换 (保持结构) 返回最终文件列表
 			if self.enable_convert.get():
@@ -624,6 +649,10 @@ class ImageToolApp:
 			if self.enable_rename.get():
 				self._rename_stage_only(files)
 			self.q.put('STATUS 预览完成' if self.dry_run else 'STATUS 完成')
+			# 生成预览签名
+			if self.dry_run and not self.stop_flag.is_set():
+				self._last_preview_signature=self._calc_preview_signature()
+				self._last_preview_files=[(p, os.path.getmtime(p), os.path.getsize(p)) for p in self._all_files if os.path.isfile(p)]
 		except Exception as e:
 			self.q.put(f'STATUS 失败: {e}')
 		finally:
@@ -946,17 +975,20 @@ class ImageToolApp:
 		tol=self.ratio_tol_var.get() if hasattr(self,'ratio_tol_var') else 0.03
 		preview=self.dry_run
 		base_out=(self.cache_dir if preview else (self.out_var.get().strip() or self.in_var.get().strip()))
-		result=[]
-		for p in file_list:
-			if self.stop_flag.is_set(): break
+		workers=max(1,self.workers_var.get())
+		result=[]; lock=threading.Lock(); done=0; total=len(file_list)
+		def classify_one(p:str):
+			nonlocal done
+			if self.stop_flag.is_set(): return None
 			if not os.path.isfile(p):
-				result.append(p); continue
+				with lock: done+=1; return p
 			try:
 				with Image.open(p) as im:
 					w,h=im.size
 			except Exception:
-				result.append(p); continue
-			if h==0: result.append(p); continue
+				with lock: done+=1; return p
+			if h==0:
+				with lock: done+=1; return p
 			ratio=w/h; label='other'
 			for rw,rh,lab in COMMON:
 				ideal=rw/rh
@@ -968,7 +1000,9 @@ class ImageToolApp:
 				except Exception: pass
 			dest=os.path.join(dir_ratio, os.path.basename(p))
 			if os.path.abspath(dest)==os.path.abspath(p):
-				result.append(p); continue
+				with lock:
+					done+=1
+				return p
 			if os.path.exists(dest):
 				if not preview:
 					dest=next_non_conflict(dest)
@@ -980,16 +1014,106 @@ class ImageToolApp:
 					dest=alt
 			try:
 				if preview:
-					# 复制，不删除源
 					shutil.copy2(p,dest)
 				else:
 					shutil.move(p,dest)
-				self.q.put(f'LOG\tRENAME\t{p}\t{dest}\t比例分类->{label}')
-				result.append(dest)
+				self.q.put(f'LOG\tCLASSIFY\t{p}\t{dest}\t比例分类->{label}')
+				res_path=dest
 			except Exception as e:
-				self.q.put(f'LOG\tRENAME\t{p}\t{p}\t比例分类失败:{e}')
-				result.append(p)
+				self.q.put(f'LOG\tCLASSIFY\t{p}\t{p}\t比例分类失败:{e}')
+				res_path=p
+			with lock:
+				done+=1
+				self.q.put(f'PROG {done} {total}')
+			return res_path
+		if workers>1:
+			with ThreadPoolExecutor(max_workers=workers) as ex:
+				for fut in as_completed([ex.submit(classify_one,p) for p in file_list]):
+					r=fut.result();
+					if r: result.append(r)
+		else:
+			for p in file_list:
+				r=classify_one(p); 
+				if r: result.append(r)
 		return result
+
+	def _calc_preview_signature(self):
+		parts=[]
+		def add(k,v): parts.append(f"{k}={v}")
+		add('classify', int(self.classify_ratio_var.get()))
+		add('convert', int(self.enable_convert.get()))
+		add('dedupe', int(self.enable_dedupe.get()))
+		add('rename', int(self.enable_rename.get()))
+		# 分类参数
+		add('rtol', getattr(self,'ratio_tol_var',tk.DoubleVar(value=0)).get())
+		add('rcustom', getattr(self,'ratio_custom_var',tk.StringVar(value='')).get())
+		add('rsnap', getattr(self,'ratio_snap_var',tk.BooleanVar(value=False)).get())
+		# 转换
+		add('fmt', self.fmt_var.get() if hasattr(self,'fmt_var') else '')
+		add('q', self.quality_var.get() if hasattr(self,'quality_var') else '')
+		add('same', self.process_same_var.get() if hasattr(self,'process_same_var') else '')
+		add('png3', self.png3_var.get() if hasattr(self,'png3_var') else '')
+		add('rmcvt', self.convert_remove_src.get() if hasattr(self,'convert_remove_src') else '')
+		# 重命名
+		add('pattern', self.pattern_var.get() if hasattr(self,'pattern_var') else '')
+		add('start', self.start_var.get() if hasattr(self,'start_var') else '')
+		add('step', self.step_var.get() if hasattr(self,'step_var') else '')
+		add('width', self.index_width_var.get() if hasattr(self,'index_width_var') else '')
+		add('overwrite', self.overwrite_var.get() if hasattr(self,'overwrite_var') else '')
+		# 去重
+		add('th', self.threshold_var.get() if hasattr(self,'threshold_var') else '')
+		add('keep', self.keep_var.get() if hasattr(self,'keep_var') else '')
+		add('action', self.dedup_action_var.get() if hasattr(self,'dedup_action_var') else '')
+		# 输入文件列表 + mtime + size
+		files=[]
+		for p in sorted(self._all_files):
+			try:
+				st=os.stat(p); files.append(f"{p}|{int(st.st_mtime)}|{st.st_size}")
+			except Exception:
+				files.append(f"{p}|0|0")
+		parts.extend(files)
+		digest=hashlib.md5('\n'.join(map(str,parts)).encode('utf-8','ignore')).hexdigest()
+		return digest
+
+	def _maybe_fast_commit(self)->bool:
+		"""若存在与当前参数完全一致的预览结果, 直接复制 _final 到真实输出, 跳过重新执行。"""
+		if not self._last_preview_signature or not self.cache_final_dir:
+			return False
+		# 当前签名
+		try:
+			current_sig=self._calc_preview_signature()
+		except Exception:
+			return False
+		if current_sig!=self._last_preview_signature:
+			return False
+		# 复制
+		out_dir=self.out_var.get().strip() or (self.in_var.get().strip() or os.getcwd())
+		os.makedirs(out_dir,exist_ok=True)
+		# 遍历 _final
+		to_copy=[]
+		for root,dirs,files in os.walk(self.cache_final_dir):
+			rel=os.path.relpath(root,self.cache_final_dir)
+			for f in files:
+				src=os.path.join(root,f)
+				if rel=='.':
+					dst=os.path.join(out_dir,f)
+				else:
+					dst=os.path.join(out_dir,rel,f)
+				to_copy.append((src,dst))
+		self.q.put(f'STATUS 快速应用 {len(to_copy)} 文件')
+		copied=0
+		for src,dst in to_copy:
+			if self.stop_flag.is_set(): break
+			os.makedirs(os.path.dirname(dst),exist_ok=True)
+			try:
+				shutil.copy2(src,dst)
+				self.q.put(f'LOG\tRENAME\t{src}\t{dst}\t快速复制')
+				copied+=1
+			except Exception as e:
+				self.q.put(f'LOG\tRENAME\t{src}\t{dst}\t快速失败:{e}')
+			self.q.put(f'PROG {copied} {len(to_copy)}')
+		self.q.put('STATUS 完成(快速)')
+		return True
 
 	def _convert_stage_only(self, files:list[str])->list[str]:
 		fmt=FMT_MAP.get(self.fmt_var.get(),'png')
@@ -1145,6 +1269,7 @@ class ImageToolApp:
 						if stage=='DEDUP': stag='STAGE_DEDUPE'
 						elif stage=='CONVERT': stag='STAGE_CONVERT'
 						elif stage=='RENAME': stag='STAGE_RENAME'
+						elif stage=='CLASSIFY': stag='STAGE_CLASSIFY'
 						elif '删' in info or '删除' in info: stag='STAGE_DELETE'
 						elif '移动' in info: stag='STAGE_MOVE'
 						# 如果是重命名合并行(含 '重命名 - 移动/复制') 保持 RENAME 颜色
@@ -1289,7 +1414,7 @@ class ImageToolApp:
 			pass
 
 	def _log_row_visible(self,stage:str,info:str,vals:tuple)->bool:
-		stage_map={'DEDUP':'去重','CONVERT':'转换','RENAME':'重命名'}
+		stage_map={'DEDUP':'去重','CONVERT':'转换','RENAME':'重命名','CLASSIFY':'分类'}
 		stage_ch=stage_map.get(stage,'信息')
 		want=self.log_filter_stage.get() if hasattr(self,'log_filter_stage') else '全部'
 		if want!='全部':
