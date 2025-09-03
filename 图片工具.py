@@ -431,6 +431,7 @@ class ImageToolApp:
 		self.enable_convert.trace_add('write', lambda *a: self._update_states())
 		self.enable_rename.trace_add('write', lambda *a: self._update_states())
 		self.enable_dedupe.trace_add('write', lambda *a: self._update_states())
+		self.classify_ratio_var.trace_add('write', lambda *a: self._update_states())
 		self.dedup_action_var.trace_add('write', lambda *a: self._update_states())
 		self.fmt_var.trace_add('write', lambda *a: self._update_states())
 		# tooltips
@@ -1327,6 +1328,17 @@ class ImageToolApp:
 
 	def _update_states(self):
 		# 去重区
+		# 分类区
+		try:
+			if hasattr(self,'frame_ratio') and self.frame_ratio:
+				enabled=self.classify_ratio_var.get()
+				for widget in (getattr(self,'_ratio_sp_rt',None), getattr(self,'_ratio_ent',None), getattr(self,'_ratio_btn_reset',None), getattr(self,'_ratio_snap',None), getattr(self,'_ratio_lbl_input',None)):
+					if widget:
+						state='normal' if enabled else 'disabled'
+						try: widget.configure(state=state)
+						except Exception: pass
+		except Exception:
+			pass
 		if hasattr(self,'frame_dedupe') and self.frame_dedupe:
 			dedupe_enabled = self.enable_dedupe.get()
 			for ch in self.frame_dedupe.winfo_children():
