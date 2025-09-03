@@ -201,6 +201,7 @@ class ImageToolApp:
 		# 退出时清理缓存
 		self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 		self.cache_trash_dir=None  # 预览模拟回收站目录
+		self.cache_final_dir=None  # 预览最终结果目录 (_final)
 
 	# ---------------- UI ----------------
 	def _build(self):
@@ -578,6 +579,9 @@ class ImageToolApp:
 		# 同时建立模拟回收站目录
 		self.cache_trash_dir=os.path.join(self.cache_dir,'_trash')
 		os.makedirs(self.cache_trash_dir, exist_ok=True)
+		# 建立最终结果目录
+		self.cache_final_dir=os.path.join(self.cache_dir,'_final')
+		os.makedirs(self.cache_final_dir, exist_ok=True)
 
 	def _clear_cache(self):
 		if self.cache_dir and os.path.exists(self.cache_dir):
@@ -585,6 +589,7 @@ class ImageToolApp:
 				shutil.rmtree(self.cache_dir)
 				self.cache_dir = None
 				self.cache_trash_dir=None
+				self.cache_final_dir=None
 			except Exception:
 				pass
 
@@ -914,6 +919,7 @@ class ImageToolApp:
 	def _parse_custom_ratios(self)->list[tuple[int,int,str]]:
 		text=self.ratio_custom_var.get().strip() if hasattr(self,'ratio_custom_var') else ''
 		if not text:
+			# 若未自定义则使用默认一组，但仍视作“自定义列表”
 			text='16:9,16:10,4:3,3:2,5:4,21:9,1:1'
 		pairs=[]
 		for token in re.split(r'[;,\s]+',text):
@@ -932,12 +938,14 @@ class ImageToolApp:
 		return [(w,h,lbl) for (w,h),lbl in uniq.items()]
 
 	def _ratio_classify_stage(self, file_list:list[str])->list[str]:
+		"""严格按自定义比例分类: 仅命中自定义集合(±tol)的进入对应目录, 其余进入 other。
+		预览模式: 复制到缓存分类目录 (不修改源); 实际执行: 移动。
+		返回新路径列表 (分类后路径)。"""
 		COMMON=self._parse_custom_ratios()
 		if not COMMON: return file_list
 		tol=self.ratio_tol_var.get() if hasattr(self,'ratio_tol_var') else 0.03
-		snap=self.ratio_snap_var.get() if hasattr(self,'ratio_snap_var') else False
 		preview=self.dry_run
-		base_out=self.cache_dir if preview else (self.out_var.get().strip() or self.in_var.get().strip())
+		base_out=(self.cache_dir if preview else (self.out_var.get().strip() or self.in_var.get().strip()))
 		result=[]
 		for p in file_list:
 			if self.stop_flag.is_set(): break
@@ -949,18 +957,11 @@ class ImageToolApp:
 			except Exception:
 				result.append(p); continue
 			if h==0: result.append(p); continue
-			ratio=w/h; label='other'; best_diff=1e9; best_label='other'
+			ratio=w/h; label='other'
 			for rw,rh,lab in COMMON:
 				ideal=rw/rh
-				if ideal==0: continue
-				diff=abs(ratio-ideal)/ideal
-				if diff<best_diff:
-					best_diff=diff; best_label=lab
-				if diff<=tol:
+				if ideal!=0 and abs(ratio-ideal)/ideal <= tol:
 					label=lab; break
-			if label=='other' and snap:
-				label=best_label
-			# 移动到子目录 (保持原文件名) — 不修改文件名内 {ratio} 此阶段不处理占位
 			dir_ratio=os.path.join(base_out,label)
 			if not os.path.isdir(dir_ratio):
 				try: os.makedirs(dir_ratio,exist_ok=True)
@@ -969,7 +970,6 @@ class ImageToolApp:
 			if os.path.abspath(dest)==os.path.abspath(p):
 				result.append(p); continue
 			if os.path.exists(dest):
-				# 冲突命名
 				if not preview:
 					dest=next_non_conflict(dest)
 				else:
@@ -980,6 +980,7 @@ class ImageToolApp:
 					dest=alt
 			try:
 				if preview:
+					# 复制，不删除源
 					shutil.copy2(p,dest)
 				else:
 					shutil.move(p,dest)
@@ -995,7 +996,9 @@ class ImageToolApp:
 		process_same=self.process_same_var.get(); quality=self.quality_var.get(); png3=self.png3_var.get()
 		remove_src_on_convert=self.convert_remove_src.get()
 		workers=max(1,self.workers_var.get())
-		out_dir=self.out_var.get().strip() or self.in_var.get().strip()
+		# 实际输出根目录 (真实或预览 final)
+		real_out=self.out_var.get().strip() or self.in_var.get().strip()
+		out_dir = (self.cache_final_dir or self.cache_dir) if self.dry_run else real_out
 		ico_sizes=None
 		if hasattr(self,'ico_keep_orig') and self.ico_keep_orig.get():
 			ico_sizes=None
@@ -1014,18 +1017,35 @@ class ImageToolApp:
 				ico_sizes=sorted(set(chosen))[:10]
 		converted=[]
 		preview=self.dry_run
+		# 若来自分类, 需要保留分类子目录结构
+		class_root = (self.cache_dir if preview else real_out)
 		for f in files:
 			if self.stop_flag.is_set(): break
 			src_ext=norm_ext(f)
 			tgt_fmt=fmt if self.enable_convert.get() else src_ext
 			need_convert=self.enable_convert.get() and (src_ext!=fmt or process_same)
 			if not need_convert:
+				# 复制原相对结构到 out_dir (仅预览时需要确保存在对应子目录; 实际不处理)
+				if preview:
+					try:
+						rel_dir=os.path.relpath(os.path.dirname(f), class_root)
+						if rel_dir=='.': rel_dir=''
+						dst_dir=os.path.join(out_dir, rel_dir)
+						os.makedirs(dst_dir, exist_ok=True)
+						dest_placeholder=os.path.join(dst_dir, os.path.basename(f))
+						if not os.path.exists(dest_placeholder):
+							shutil.copy2(f, dest_placeholder)
+					except Exception:
+						pass
 				converted.append(f); continue
 			basename=os.path.splitext(os.path.basename(f))[0]
 			out_name=f"{basename}.{tgt_fmt}"
-			dest=os.path.join(out_dir,out_name)
-			if preview:
-				dest=os.path.join(self.cache_dir or out_dir, out_name)
+			# 按原相对目录放入 out_dir
+			rel_dir=os.path.relpath(os.path.dirname(f), class_root)
+			if rel_dir=='.': rel_dir=''
+			dest_dir=os.path.join(out_dir, rel_dir)
+			os.makedirs(dest_dir, exist_ok=True)
+			dest=os.path.join(dest_dir,out_name)
 			ok,msg=convert_one(f,dest,tgt_fmt,quality if tgt_fmt in ('jpg','png','webp') else None,png3 if tgt_fmt=='png' else False,ico_sizes if tgt_fmt=='ico' else None,self.ico_square_mode_code() if tgt_fmt=='ico' else None)
 			self.q.put(f'LOG\tCONVERT\t{f}\t{dest}\t{"转换" if ok else "转换失败"}')
 			if ok and remove_src_on_convert and not preview:
@@ -1039,7 +1059,10 @@ class ImageToolApp:
 		start=self.start_var.get(); step=self.step_var.get(); idx=start
 		pad_width=self.index_width_var.get(); overwrite=OVERWRITE_MAP.get(self.overwrite_var.get(),'overwrite')
 		remove_src=self.rename_remove_src.get(); preview=self.dry_run
-		out_dir=self.out_var.get().strip() or self.in_var.get().strip()
+		real_out=self.out_var.get().strip() or self.in_var.get().strip()
+		out_dir=(self.cache_final_dir or self.cache_dir) if preview else real_out
+		# 若文件在分类子目录内，保持相对目录
+		class_root=(self.cache_dir if preview else real_out)
 		# 支持 {ratio} 占位符: 根据已存在目录(分类阶段结果)推断; 若无则尝试从父目录名识别
 		for f in files:
 			if self.stop_flag.is_set(): break
@@ -1063,7 +1086,12 @@ class ImageToolApp:
 			final_name=(name_raw.replace('{name}',stem).replace('{ext}',f'.{ext}').replace('{fmt}',ext))
 			if '.' not in os.path.basename(final_name):
 				final_name+=f'.{ext}'
-			dest=os.path.join(out_dir, final_name)
+			# 分类相对目录
+			rel_dir=os.path.relpath(os.path.dirname(f), class_root)
+			if rel_dir=='.': rel_dir=''
+			target_dir=os.path.join(out_dir, rel_dir)
+			os.makedirs(target_dir, exist_ok=True)
+			dest=os.path.join(target_dir, final_name)
 			if os.path.abspath(dest)==os.path.abspath(f):
 				idx+=step; continue
 			if os.path.exists(dest):
@@ -1089,66 +1117,7 @@ class ImageToolApp:
 				self.q.put(f'LOG\tRENAME\t{f}\t{dest}\t失败:{e}')
 			idx+=step
 
-	def _ratio_classify_stage(self, file_paths:List[str]):
-		"""按常见比例分类: 若文件名含 {ratio} 占位则替换; 否则移动到子目录。"""
-		COMMON=[(16,9,'16x9'),(16,10,'16x10'),(4,3,'4x3'),(1,1,'1x1'),(21,9,'21x9'),(3,2,'3x2'),(5,4,'5x4')]
-		tol=self.ratio_tol_var.get() if hasattr(self,'ratio_tol_var') else 0.03
-		preview=self.dry_run
-		base_out=self.cache_dir if preview else (self.out_var.get().strip() or self.in_var.get().strip())
-		result_paths=[]
-		for p in file_paths:
-			if self.stop_flag.is_set(): break
-			if not os.path.isfile(p):
-				continue
-			try:
-				with Image.open(p) as im:
-					w,h=im.size
-			except Exception as e:
-				self.q.put(f'LOG\tRENAME\t{p}\t{p}\t比例分类失败:读图失败')
-				continue
-			if h==0:
-				continue
-			ratio=w/h; label='other'
-			for rw,rh,lab in COMMON:
-				ideal=rw/rh
-				if ideal!=0 and abs(ratio-ideal)/ideal <= tol:
-					label=lab; break
-			base=os.path.basename(p)
-			if '{ratio}' in base:
-				new_base=base.replace('{ratio}',label)
-				dest=os.path.join(os.path.dirname(p), new_base)
-			else:
-				dir_ratio=os.path.join(base_out,label)
-				os.makedirs(dir_ratio,exist_ok=True)
-				dest=os.path.join(dir_ratio, base)
-			if p==dest:
-				result_paths.append(p); continue
-			if os.path.exists(dest):
-				# 解决冲突
-				if not preview:
-					dest=next_non_conflict(dest)
-				else:
-					# 预览冲突简易处理
-					base_no,ext=os.path.splitext(dest); i=1
-					alt=f"{base_no}_{i}{ext}"
-					while os.path.exists(alt):
-						i+=1; alt=f"{base_no}_{i}{ext}"
-					dest=alt
-			try:
-				if preview:
-					shutil.copy2(p,dest)
-					if p!=dest and os.path.exists(p):
-						os.remove(p)
-				else:
-					# 移动或重命名
-					os.replace(p,dest)
-				act='重命名' if '{ratio}' in base else '移动'
-				self.q.put(f'LOG\tRENAME\t{p}\t{dest}\t比例分类 {act}->{label}')
-				result_paths.append(dest)
-			except Exception as e:
-				self.q.put(f'LOG\tRENAME\t{p}\t{p}\t比例分类失败:{e}')
-				result_paths.append(p)
-		return result_paths
+	# (删除重复的旧 _ratio_classify_stage 定义)
 
 	# 队列 + 预览
 	def _drain(self):
@@ -1225,7 +1194,7 @@ class ImageToolApp:
 		src_path=first_exist(src_candidates)
 		result_path=first_exist(dst_candidates)
 		# 加载函数
-		def load_to(label,info_var,path,placeholder):
+		def load_to(label,info_var,path,placeholder,base_root):
 			if not path:
 				label.configure(text=placeholder,image=''); info_var.set(''); return (0,0)
 			try:
@@ -1239,12 +1208,19 @@ class ImageToolApp:
 				except Exception:
 					sz=0
 				size_txt=_fmt_size(sz)
-				info_var.set(f'{w}x{h} {size_txt} {os.path.basename(path)}')
+				# 相对路径 (相对于真实输出目录或预览 final)
+				try:
+					rel=os.path.relpath(path, base_root)
+				except Exception:
+					rel=os.path.basename(path)
+				info_var.set(f'{w}x{h} {size_txt} {rel}')
 				return photo.width(), photo.height()
 			except Exception as e:
 				label.configure(text=f'预览失败:{e}',image=''); info_var.set(''); return (0,0)
-		bw,bh=load_to(self.preview_before_label,self.preview_before_info,src_path,'(无源)')
-		aw,ah=load_to(self.preview_after_label,self.preview_after_info,result_path,'(无结果)')
+		# 预览根基准: 真实执行=输出目录; 预览=cache_final_dir (若存在) 否则 cache_dir
+		base_root = (self.cache_final_dir or self.cache_dir) if self.dry_run else (self.out_var.get().strip() or self.in_var.get().strip())
+		bw,bh=load_to(self.preview_before_label,self.preview_before_info,src_path,'(无源)',base_root)
+		aw,ah=load_to(self.preview_after_label,self.preview_after_info,result_path,'(无结果)',base_root)
 		self._maybe_resize_window()
 
 	def _maybe_resize_window(self):
