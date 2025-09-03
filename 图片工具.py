@@ -225,7 +225,7 @@ class ImageToolApp:
 		self.enable_rename=tk.BooleanVar(value=False)
 		# 比例分类配置 (新独立区域)
 		self.classify_ratio_var=tk.BooleanVar(value=False)
-		self.ratio_tol_var=tk.DoubleVar(value=0.06)
+		self.ratio_tol_var=tk.DoubleVar(value=0.10)
 		self.ratio_custom_var=tk.StringVar(value='')
 		self.ratio_snap_var=tk.BooleanVar(value=False)  # 不匹配是否取最近
 		cb_classify=ttk.Checkbutton(opts,text='分类',variable=self.classify_ratio_var); cb_classify.pack(side='left',padx=2)
