@@ -4,8 +4,24 @@
 """
 import os, sys, threading, queue, tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from .utils import iter_images, norm_ext, next_non_conflict
-from .stages import classify, convert, rename, dedupe
+
+# 兼容包方式与直接脚本运行
+try:  # 包内相对导入
+    from .utils import iter_images, norm_ext, next_non_conflict
+    from .stages import classify, convert, rename, dedupe
+except Exception:
+    # 直接运行: python app/main_app.py
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    parent = os.path.dirname(base_dir)
+    if parent not in sys.path:
+        sys.path.insert(0, parent)
+    try:
+        from app.utils import iter_images, norm_ext, next_non_conflict  # type: ignore
+        from app.stages import classify, convert, rename, dedupe  # type: ignore
+    except Exception:
+        # 最后退: 同级无包结构
+        from utils import iter_images, norm_ext, next_non_conflict  # type: ignore
+        from stages import classify, convert, rename, dedupe  # type: ignore
 
 class ModularApp:
     def __init__(self, root:tk.Tk):
