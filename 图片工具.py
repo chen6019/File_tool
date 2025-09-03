@@ -190,6 +190,8 @@ class ImageToolApp:
 		self.frame_convert=None; self.frame_rename=None
 		self.move_dir_entry=None; self.move_dir_btn=None
 		self.dry_run=False
+		self.single_file_mode=False
+		self._ratio_map={}  # 路径 -> 比例标签
 		# 回收站逻辑自动化 (send2trash 可用即使用)
 		self.trash_cb=None  # 兼容旧引用
 		self.last_out_dir=None
@@ -210,7 +212,7 @@ class ImageToolApp:
 		self.in_var=tk.StringVar(); ent_in=ttk.Entry(io,textvariable=self.in_var,width=40); ent_in.grid(row=0,column=1,sticky='we',padx=3)
 		btn_in=ttk.Button(io,text='目录',command=self._pick_in,width=5); btn_in.grid(row=0,column=2,padx=(0,3))
 		btn_in_file=ttk.Button(io,text='文件',command=self._pick_in_file,width=5); btn_in_file.grid(row=0,column=3,padx=(0,8))
-		self.recursive_var=tk.BooleanVar(value=True); cb_rec=ttk.Checkbutton(io,text='递归',variable=self.recursive_var); cb_rec.grid(row=0,column=4,sticky='w')
+		self.recursive_var=tk.BooleanVar(value=False); cb_rec=ttk.Checkbutton(io,text='递归',variable=self.recursive_var); cb_rec.grid(row=0,column=4,sticky='w')
 		ttk.Label(io,text='输出:').grid(row=0,column=5,sticky='e')
 		self.out_var=tk.StringVar(); ent_out=ttk.Entry(io,textvariable=self.out_var,width=32); ent_out.grid(row=0,column=6,sticky='we',padx=3)
 		self.out_var.trace_add('write', self._on_out_dir_change)
@@ -221,6 +223,11 @@ class ImageToolApp:
 		self.enable_dedupe=tk.BooleanVar(value=True)
 		self.enable_convert=tk.BooleanVar(value=True)
 		self.enable_rename=tk.BooleanVar(value=True)
+		# 比例分类配置 (新独立区域)
+		self.classify_ratio_var=tk.BooleanVar(value=False)
+		self.ratio_tol_var=tk.DoubleVar(value=0.03)
+		self.ratio_custom_var=tk.StringVar(value='')
+		self.ratio_snap_var=tk.BooleanVar(value=False)  # 不匹配是否取最近
 		cb_dedupe=ttk.Checkbutton(opts,text='去重',variable=self.enable_dedupe); cb_dedupe.pack(side='left',padx=2)
 		cb_convert=ttk.Checkbutton(opts,text='转换',variable=self.enable_convert); cb_convert.pack(side='left',padx=2)
 		cb_rename=ttk.Checkbutton(opts,text='重命名',variable=self.enable_rename); cb_rename.pack(side='left',padx=2)
@@ -262,8 +269,6 @@ class ImageToolApp:
 		self.ico_keep_orig=tk.BooleanVar(value=False)
 		self.ico_size_vars={s:tk.BooleanVar(value=(s in (16,32,48,64))) for s in (16,32,48,64,128,256)}
 		self.ico_square_mode=tk.StringVar(value='fit')  # keep|center|topleft|fit
-		self.classify_ratio_var=tk.BooleanVar(value=False)
-		self.ratio_tol_var=tk.DoubleVar(value=0.03)  # 比例相对误差容差
 		ttk.Label(convert,text='格式').grid(row=0,column=0,sticky='e')
 		cb_fmt=ttk.Combobox(convert,textvariable=self.fmt_var,values=list(FMT_MAP.keys()),width=12,state='readonly'); cb_fmt.grid(row=0,column=1,sticky='w',padx=(0,12))
 		ttk.Label(convert,text='质量').grid(row=0,column=2,sticky='e')
@@ -300,15 +305,22 @@ class ImageToolApp:
 		cb_keep=ttk.Checkbutton(ico_box,text='不改变',variable=self.ico_keep_orig)
 		cb_keep.grid(row=0,column=6,sticky='w',padx=(6,0))
 		self.ico_keep_cb=cb_keep; self.ico_custom_entry=ent_ico; self.ico_label=lbl_ico
-		# 比例分类
-		ratio_frame=ttk.Frame(convert)
-		ratio_frame.grid(row=3,column=0,columnspan=8,sticky='w',pady=(2,2))
-		cb_ratio=ttk.Checkbutton(ratio_frame,text='按比例分类',variable=self.classify_ratio_var)
-		cb_ratio.pack(side='left')
-		ttk.Label(ratio_frame,text='容差').pack(side='left',padx=(8,2))
-		sp_rt=ttk.Spinbox(ratio_frame,from_=0.0,to=0.2,increment=0.005,format='%.3f',width=6,textvariable=self.ratio_tol_var)
-		sp_rt.pack(side='left')
-		self._ratio_widgets=(ratio_frame,cb_ratio,sp_rt)
+		# 新: 比例分类区域 (放在转换前, 因执行顺序要求)
+		clsf=ttk.LabelFrame(outer,text='比例分类 (第一阶段)'); clsf.pack(fill='x',pady=(0,10))
+		self.frame_ratio=clsf
+		clsf.columnconfigure(5,weight=1)
+		cb_ratio=ttk.Checkbutton(clsf,text='启用',variable=self.classify_ratio_var)
+		cb_ratio.grid(row=0,column=0,sticky='w',padx=(2,4))
+		ttk.Label(clsf,text='容差').grid(row=0,column=1,sticky='e')
+		sp_rt=ttk.Spinbox(clsf,from_=0.0,to=0.2,increment=0.005,format='%.3f',width=6,textvariable=self.ratio_tol_var)
+		sp_rt.grid(row=0,column=2,sticky='w')
+		cb_snap=ttk.Checkbutton(clsf,text='不匹配吸附最近',variable=self.ratio_snap_var)
+		cb_snap.grid(row=0,column=3,sticky='w',padx=(8,0))
+		btn_reset_ratio=ttk.Button(clsf,text='恢复默认',width=10,command=lambda: self.ratio_custom_var.set('16:9,16:10,4:3,3:2,5:4,21:9,1:1'))
+		btn_reset_ratio.grid(row=0,column=4,sticky='w',padx=(8,0))
+		ttk.Label(clsf,text='自定义(逗号/空格 16:9/16x9)').grid(row=1,column=0,sticky='e',pady=(4,0))
+		ent_ratio=ttk.Entry(clsf,textvariable=self.ratio_custom_var,width=48)
+		ent_ratio.grid(row=1,column=1,columnspan=4,sticky='we',padx=(4,4),pady=(4,2))
 		convert.columnconfigure(3,weight=1)
 		for i in range(8):
 			if i!=3: convert.columnconfigure(i,weight=0)
@@ -436,9 +448,13 @@ class ImageToolApp:
 			(frame_sq,'非方图处理策略 (仅 ICO 格式时有效)'),
 			(ent_pattern,'重命名模式: {name}{ext}{index}{fmt} 支持 {index:03} 指定宽度'),(sp_start,'序号起始'),(sp_step,'序号步长'),(sp_indexw,'序号零填充宽度 (0=不填)'),(cb_over,'覆盖策略'),(cb_rm_src,'删除源文件(移动而不是复制)')
 		]
-		# 比例分类提示
-		if 'ratio_frame' in locals():
-			more_tips.append((ratio_frame,'按常见比例(16x9/4x3/21x9等)放入子目录; 支持 {ratio} 占位符; 容差=允许偏差'))
+		# 比例分类提示 (新区域)
+		if hasattr(self,'frame_ratio'):
+			more_tips.append((self.frame_ratio,'按常见比例创建子目录或占位符 {ratio}; 自定义: 16:9,4:3 ...; 吸附=选最近比值'))
+			more_tips.append((cb_snap,'未命中容差时是否取最近比值标签'))
+			more_tips.append((sp_rt,'相对误差容差, 比如 0.03=±3%'))
+			more_tips.append((ent_ratio,'自定义列表, 支持 16:9 / 16x9 形式'))
+			more_tips.append((cb_ratio,'启用后单文件模式自动跳过'))
 		tips.extend(more_tips)
 		# 补充自动调整窗口提示
 		if 'cb_auto' in locals():
@@ -481,6 +497,7 @@ class ImageToolApp:
 			self._ensure_cache_dir()
 		inp=self.in_var.get().strip()
 		if not inp: self.status_var.set('未选择输入'); return
+		self.single_file_mode=False
 		if os.path.isdir(inp):
 			root_dir=inp
 			out_dir=self.out_var.get().strip() or root_dir
@@ -492,6 +509,7 @@ class ImageToolApp:
 			out_dir=self.out_var.get().strip() or root_dir
 			os.makedirs(out_dir,exist_ok=True)
 			self._all_files=[inp]
+			self.single_file_mode=True
 		else:
 			self.status_var.set('输入不存在'); return
 		if not self._all_files: self.status_var.set('无图片'); return
@@ -552,22 +570,28 @@ class ImageToolApp:
 
 	# 管线
 	def _pipeline(self):
+		"""执行顺序: 1分类(多文件且启用) -> 2转换 -> 3去重(多文件且启用) -> 4重命名"""
 		try:
-			kept=self._all_files
-			if self.enable_dedupe.get():
-				kept=self._dedupe_stage(kept)
-				if self.stop_flag.is_set(): return
-			converted=kept
-			if self.enable_convert.get() or self.enable_rename.get():
-				converted=self._convert_rename_stage(kept)
-			# 比例分类独立阶段
-			if self.classify_ratio_var.get():
-				self._ratio_classify_stage(converted)
+			files=self._all_files
+			# 1 分类 (仅多文件; 单文件跳过) 提前, 影响后续路径结构
+			if not self.single_file_mode and self.classify_ratio_var.get():
+				files=self._ratio_classify_stage(files)
+			if self.stop_flag.is_set(): return
+			# 2 转换 (保持结构) 返回最终文件列表
+			if self.enable_convert.get():
+				files=self._convert_stage_only(files)
+			if self.stop_flag.is_set(): return
+			# 3 去重 (转换后, 可能减少文件) 单文件模式跳过
+			if not self.single_file_mode and self.enable_dedupe.get():
+				files=self._dedupe_stage(files)
+			if self.stop_flag.is_set(): return
+			# 4 重命名 (最后, 保证最终命名基于已分类/去重结果)
+			if self.enable_rename.get():
+				self._rename_stage_only(files)
 			self.q.put('STATUS 预览完成' if self.dry_run else 'STATUS 完成')
 		except Exception as e:
 			self.q.put(f'STATUS 失败: {e}')
 		finally:
-			# 执行后重置 dry_run
 			self.dry_run=False
 
 	# 去重
@@ -855,6 +879,185 @@ class ImageToolApp:
 		else:
 			for t in tasks: job(t)
 		return final_paths
+
+	# ===== 新阶段函数 (顺序版) =====
+	def _parse_custom_ratios(self)->list[tuple[int,int,str]]:
+		text=self.ratio_custom_var.get().strip() if hasattr(self,'ratio_custom_var') else ''
+		if not text:
+			text='16:9,16:10,4:3,3:2,5:4,21:9,1:1'
+		pairs=[]
+		for token in re.split(r'[;,\s]+',text):
+			if not token: continue
+			token=token.lower().replace('x',':')
+			if ':' not in token: continue
+			a,b=token.split(':',1)
+			if a.isdigit() and b.isdigit():
+				w=int(a); h=int(b)
+				if w>0 and h>0 and w<=10000 and h<=10000:
+					pairs.append((w,h,f'{w}x{h}'))
+		# 去重按宽高
+		uniq={}
+		for w,h,label in pairs:
+			uniq[(w,h)]=label
+		return [(w,h,lbl) for (w,h),lbl in uniq.items()]
+
+	def _ratio_classify_stage(self, file_list:list[str])->list[str]:
+		COMMON=self._parse_custom_ratios()
+		if not COMMON: return file_list
+		tol=self.ratio_tol_var.get() if hasattr(self,'ratio_tol_var') else 0.03
+		snap=self.ratio_snap_var.get() if hasattr(self,'ratio_snap_var') else False
+		preview=self.dry_run
+		base_out=self.cache_dir if preview else (self.out_var.get().strip() or self.in_var.get().strip())
+		result=[]
+		for p in file_list:
+			if self.stop_flag.is_set(): break
+			if not os.path.isfile(p):
+				result.append(p); continue
+			try:
+				with Image.open(p) as im:
+					w,h=im.size
+			except Exception:
+				result.append(p); continue
+			if h==0: result.append(p); continue
+			ratio=w/h; label='other'; best_diff=1e9; best_label='other'
+			for rw,rh,lab in COMMON:
+				ideal=rw/rh
+				if ideal==0: continue
+				diff=abs(ratio-ideal)/ideal
+				if diff<best_diff:
+					best_diff=diff; best_label=lab
+				if diff<=tol:
+					label=lab; break
+			if label=='other' and snap:
+				label=best_label
+			# 移动到子目录 (保持原文件名) — 不修改文件名内 {ratio} 此阶段不处理占位
+			dir_ratio=os.path.join(base_out,label)
+			if not os.path.isdir(dir_ratio):
+				try: os.makedirs(dir_ratio,exist_ok=True)
+				except Exception: pass
+			dest=os.path.join(dir_ratio, os.path.basename(p))
+			if os.path.abspath(dest)==os.path.abspath(p):
+				result.append(p); continue
+			if os.path.exists(dest):
+				# 冲突命名
+				if not preview:
+					dest=next_non_conflict(dest)
+				else:
+					base_no,ext=os.path.splitext(dest); i=1
+					alt=f"{base_no}_{i}{ext}"
+					while os.path.exists(alt):
+						i+=1; alt=f"{base_no}_{i}{ext}"
+					dest=alt
+			try:
+				if preview:
+					shutil.copy2(p,dest)
+				else:
+					shutil.move(p,dest)
+				self.q.put(f'LOG\tRENAME\t{p}\t{dest}\t比例分类->{label}')
+				result.append(dest)
+			except Exception as e:
+				self.q.put(f'LOG\tRENAME\t{p}\t{p}\t比例分类失败:{e}')
+				result.append(p)
+		return result
+
+	def _convert_stage_only(self, files:list[str])->list[str]:
+		fmt=FMT_MAP.get(self.fmt_var.get(),'png')
+		process_same=self.process_same_var.get(); quality=self.quality_var.get(); png3=self.png3_var.get()
+		remove_src_on_convert=self.convert_remove_src.get()
+		workers=max(1,self.workers_var.get())
+		out_dir=self.out_var.get().strip() or self.in_var.get().strip()
+		ico_sizes=None
+		if hasattr(self,'ico_keep_orig') and self.ico_keep_orig.get():
+			ico_sizes=None
+		else:
+			chosen=[]
+			if hasattr(self,'ico_size_vars'):
+				for s,var in self.ico_size_vars.items():
+					if var.get(): chosen.append(s)
+			custom=self.ico_sizes_var.get().strip() if hasattr(self,'ico_sizes_var') else ''
+			if custom:
+				for token in custom.replace('；',';').replace(',', ' ').replace(';',' ').split():
+					if token.isdigit():
+						v=int(token)
+						if 1<=v<=1024: chosen.append(v)
+			if chosen:
+				ico_sizes=sorted(set(chosen))[:10]
+		converted=[]
+		preview=self.dry_run
+		for f in files:
+			if self.stop_flag.is_set(): break
+			src_ext=norm_ext(f)
+			tgt_fmt=fmt if self.enable_convert.get() else src_ext
+			need_convert=self.enable_convert.get() and (src_ext!=fmt or process_same)
+			if not need_convert:
+				converted.append(f); continue
+			basename=os.path.splitext(os.path.basename(f))[0]
+			out_name=f"{basename}.{tgt_fmt}"
+			dest=os.path.join(out_dir,out_name)
+			if preview:
+				dest=os.path.join(self.cache_dir or out_dir, out_name)
+			ok,msg=convert_one(f,dest,tgt_fmt,quality if tgt_fmt in ('jpg','png','webp') else None,png3 if tgt_fmt=='png' else False,ico_sizes if tgt_fmt=='ico' else None,self.ico_square_mode_code() if tgt_fmt=='ico' else None)
+			self.q.put(f'LOG\tCONVERT\t{f}\t{dest}\t{"转换" if ok else "转换失败"}')
+			if ok and remove_src_on_convert and not preview:
+				ok_del,_m=safe_delete(f)
+			converted.append(dest if ok else f)
+		return converted
+
+	def _rename_stage_only(self, files:list[str]):
+		pattern=self.pattern_var.get().strip()
+		if not pattern: return
+		start=self.start_var.get(); step=self.step_var.get(); idx=start
+		pad_width=self.index_width_var.get(); overwrite=OVERWRITE_MAP.get(self.overwrite_var.get(),'overwrite')
+		remove_src=self.rename_remove_src.get(); preview=self.dry_run
+		out_dir=self.out_var.get().strip() or self.in_var.get().strip()
+		# 支持 {ratio} 占位符: 根据已存在目录(分类阶段结果)推断; 若无则尝试从父目录名识别
+		for f in files:
+			if self.stop_flag.is_set(): break
+			if not os.path.isfile(f): continue
+			ext=norm_ext(f); stem=os.path.splitext(os.path.basename(f))[0]
+			name_raw=pattern
+			def repl_index(m):
+				w=int(m.group(1)); return str(idx).zfill(w)
+			name_raw=re.sub(r'\{index:(\d+)\}', repl_index, name_raw)
+			if '{index}' in name_raw:
+				name_raw=name_raw.replace('{index}', str(idx).zfill(pad_width) if pad_width>0 else str(idx))
+			# ratio 占位
+			ratio_label=''
+			parent=os.path.basename(os.path.dirname(f))
+			if re.match(r'^\d+x\d+$', parent): ratio_label=parent
+			if not ratio_label:
+				match=re.search(r'(\d+)x(\d+)', stem)
+				if match:
+					ratio_label=f"{match.group(1)}x{match.group(2)}"
+			name_raw=name_raw.replace('{ratio}', ratio_label or 'ratio')
+			final_name=(name_raw.replace('{name}',stem).replace('{ext}',f'.{ext}').replace('{fmt}',ext))
+			if '.' not in os.path.basename(final_name):
+				final_name+=f'.{ext}'
+			dest=os.path.join(out_dir, final_name)
+			if os.path.abspath(dest)==os.path.abspath(f):
+				idx+=step; continue
+			if os.path.exists(dest):
+				if overwrite=='skip':
+					self.q.put(f'LOG\tRENAME\t{f}\t{dest}\t跳过(存在)'); idx+=step; continue
+				elif overwrite=='rename':
+					if not preview:
+						dest=next_non_conflict(dest)
+					else:
+						dest=dest+'(预览改名)'
+			try:
+				if preview:
+					shutil.copy2(f,dest)
+					if remove_src and os.path.exists(f):
+						self._simulate_delete(f)
+				else:
+					if remove_src:
+						shutil.move(f,dest)
+					else:
+						shutil.copy2(f,dest)
+				self.q.put(f'LOG\tRENAME\t{f}\t{dest}\t重命名')
+			except Exception as e:
+				self.q.put(f'LOG\tRENAME\t{f}\t{dest}\t失败:{e}')
+			idx+=step
 
 	def _ratio_classify_stage(self, file_paths:List[str]):
 		"""按常见比例分类: 若文件名含 {ratio} 占位则替换; 否则移动到子目录。"""
