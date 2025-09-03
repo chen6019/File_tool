@@ -585,6 +585,9 @@ class ImageToolApp:
 			return
 		out_dir = self.out_var.get().strip() or os.getcwd()
 		self.cache_dir = os.path.join(out_dir, '.preview_cache')
+		# 若错误指向 _final, 回退
+		if os.path.basename(self.cache_dir)=='_final':
+			self.cache_dir=os.path.dirname(self.cache_dir)
 		os.makedirs(self.cache_dir, exist_ok=True)
 		# 同时建立模拟回收站目录
 		self.cache_trash_dir=os.path.join(self.cache_dir,'_trash')
@@ -597,6 +600,11 @@ class ImageToolApp:
 			self.cache_final_dir=candidate_final
 		if not os.path.exists(self.cache_final_dir):
 			os.makedirs(self.cache_final_dir, exist_ok=True)
+		# 清除内层重复 _final
+		inner=os.path.join(self.cache_final_dir,'_final')
+		if os.path.isdir(inner):
+			try: shutil.rmtree(inner)
+			except Exception: pass
 
 	def _clear_cache(self):
 		if self.cache_dir and os.path.exists(self.cache_dir):
