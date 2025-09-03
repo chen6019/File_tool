@@ -1,7 +1,7 @@
 """图片工具
 """
 from __future__ import annotations
-import os, sys, threading, queue, shutil, subprocess, re, hashlib
+import os, sys, threading, queue, shutil, subprocess, re, hashlib, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import List, Iterable
@@ -1262,6 +1262,11 @@ class ImageToolApp:
 		try:
 			while True:
 				m=self.q.get_nowait()
+				# 错误行写入缓存 log.txt 并打印控制台
+				try:
+					self._append_cache_error_log(m)
+				except Exception:
+					pass
 				if m.startswith('HASH '):
 					_,d,total=m.split(); d=int(d); total=int(total)
 					self.progress['maximum']=total; self.progress['value']=d
@@ -1412,6 +1417,27 @@ class ImageToolApp:
 				while os.path.exists(target):
 					target=os.path.join(self.cache_trash_dir, f"{base_no}_{i}{ext}"); i+=1
 			shutil.copy2(path, target)
+		except Exception:
+			pass
+
+	def _append_cache_error_log(self, line:str):
+		"""将包含 失败/错 的日志写入缓存 log.txt (带时间戳), 同时打印到控制台。
+		只处理阶段化日志/状态行, 以避免噪音。"""
+		if not line:
+			return
+		# 仅当包含关键字 (失败 / 错) 认为是错误
+		if '失败' not in line and '错' not in line:
+			return
+		try:
+			self._ensure_cache_dir()
+			if not self.cache_dir:
+				return
+			log_path=os.path.join(self.cache_dir,'log.txt')
+			stamp=time.strftime('%Y-%m-%d %H:%M:%S')
+			with open(log_path,'a',encoding='utf-8',errors='ignore') as fw:
+				fw.write(f'[{stamp}] {line}\n')
+			# 控制台输出 (去除内部制表符 -> 可读)
+			print(line.replace('\t',' | '))
 		except Exception:
 			pass
 
