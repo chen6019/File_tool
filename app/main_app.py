@@ -45,6 +45,7 @@ class ModularApp:
             self.classify_tol    = tk.DoubleVar(value=0.03)
             self.classify_custom = tk.StringVar(value='16:9,4:3,1:1')
             self.classify_snap   = tk.BooleanVar(value=False)
+            self.ratio_presets = ['16:9','16:10','4:3','3:2','5:4','21:9','1:1']
             # 转换参数
             self.fmt_var            = tk.StringVar(value='webp')
             self.quality_var        = tk.IntVar(value=90)
@@ -85,12 +86,32 @@ class ModularApp:
         ttk.Button(bar,text='开始',command=lambda: self._start(False)).pack(side='right',padx=4)
         # 分类参数
         clsf=ttk.LabelFrame(outer,text='分类参数'); clsf.pack(fill='x',pady=4)
-        ttk.Label(clsf,text='容差').grid(row=0,column=0,sticky='e')
-        ttk.Entry(clsf,textvariable=self.classify_tol,width=6).grid(row=0,column=1)
-        ttk.Checkbutton(clsf,text='吸附最近',variable=self.classify_snap).grid(row=0,column=2,padx=4)
+        self._frame_classify=clsf
+        lbl_tol=ttk.Label(clsf,text='容差'); lbl_tol.grid(row=0,column=0,sticky='e')
+        ent_tol=ttk.Entry(clsf,textvariable=self.classify_tol,width=6); ent_tol.grid(row=0,column=1)
+        cb_snap=ttk.Checkbutton(clsf,text='吸附最近',variable=self.classify_snap); cb_snap.grid(row=0,column=2,padx=4)
         ttk.Label(clsf,text='自定义').grid(row=0,column=3,sticky='e')
-        ttk.Entry(clsf,textvariable=self.classify_custom,width=40).grid(row=0,column=4,sticky='we')
+        ent_rat=ttk.Entry(clsf,textvariable=self.classify_custom,width=40); ent_rat.grid(row=0,column=4,sticky='we')
         clsf.columnconfigure(4,weight=1)
+        # 预设按钮行
+        preset_bar=ttk.Frame(clsf); preset_bar.grid(row=1,column=0,columnspan=5,sticky='w',pady=(2,0))
+        self._preset_buttons=[]
+        def toggle_ratio(val:str):
+            cur=self.classify_custom.get().replace('；',';').replace('，',',').replace(';',',')
+            parts=[p.strip() for p in cur.split(',') if p.strip()]
+            low={p.lower():p for p in parts}
+            k=val.lower()
+            if k in low:
+                parts=[p for p in parts if p.lower()!=k]
+            else:
+                parts.append(val)
+            self.classify_custom.set(','.join(parts))
+        for r in self.ratio_presets:
+            b=ttk.Button(preset_bar,text=r,width=6,command=lambda v=r: toggle_ratio(v)); b.pack(side='left',padx=1)
+            self._preset_buttons.append(b)
+        btn_clear=ttk.Button(preset_bar,text='清空',width=6,command=lambda: self.classify_custom.set(''))
+        btn_clear.pack(side='left',padx=(8,0))
+        self._preset_btn_clear=btn_clear
         # 转换参数
         cv=ttk.LabelFrame(outer,text='转换参数'); cv.pack(fill='x',pady=4)
         ttk.Label(cv,text='格式').grid(row=0,column=0,sticky='e')
@@ -127,6 +148,10 @@ class ModularApp:
         ttk.Combobox(rename_box,textvariable=self.overwrite_var,values=['覆盖原有','跳过已存在','自动改名'],width=10,state='readonly').grid(row=0,column=9,sticky='w')
         log_frame=ttk.Frame(outer); log_frame.pack(fill='both',expand=True,pady=(6,0))
         self.log=tk.Listbox(log_frame,height=16); self.log.pack(fill='both',expand=True)
+        # 状态刷新
+        for v in (self.enable_classify,self.enable_convert,self.enable_dedupe,self.enable_rename):
+            v.trace_add('write', lambda *a: self._update_states())
+        self._update_states()
 
     def _pick_dir(self):
         d=filedialog.askdirectory();
@@ -155,8 +180,14 @@ class ModularApp:
         files=self.files
         out_dir=self.out_var.get().strip() or (os.path.dirname(files[0]) if files else os.getcwd())
         os.makedirs(out_dir,exist_ok=True)
+        ratio_map={}
         if self.enable_classify.get() and len(files)>1:
+            before_map={f:None for f in files}
             files=classify.classify(files,out_dir,self.preview,self.classify_tol.get(),self.classify_snap.get(),self.classify_custom.get(),self._log)
+            # 推断 ratio 标签（目录名）
+            for new_path in files:
+                base_dir=os.path.basename(os.path.dirname(new_path))
+                ratio_map[new_path]=base_dir
         if self.enable_convert.get():
             # 解析 ico 尺寸
             ico_sizes=None
@@ -176,8 +207,25 @@ class ModularApp:
         if self.enable_rename.get():
             from .stages.rename import batch_rename
             overwrite_map={'覆盖原有':'overwrite','跳过已存在':'skip','自动改名':'rename'}
-            batch_rename(files,self.pattern_var.get(),self.start_var.get(),self.step_var.get(),self.width_var.get(),overwrite_map.get(self.overwrite_var.get(),'overwrite'),False,self.preview,out_dir,self._log)
+            batch_rename(files,self.pattern_var.get(),self.start_var.get(),self.step_var.get(),self.width_var.get(),overwrite_map.get(self.overwrite_var.get(),'overwrite'),False,self.preview,out_dir,self._log,ratio_map=ratio_map)
         self._log('STATUS 完成')
+
+    def _update_states(self):
+        # 分类区灰显
+        enabled=self.enable_classify.get()
+        if hasattr(self,'_frame_classify'):
+            targets=[]
+            for ch in self._frame_classify.winfo_children():
+                targets.append(ch)
+            for w in targets:
+                try:
+                    cls=w.winfo_class()
+                    if cls=='TLabel' or cls.startswith('T') or cls in ('Entry','Button','TButton','Checkbutton','TCheckbutton'):
+                        w.configure(state='normal' if enabled else 'disabled')
+                except Exception:
+                    pass
+        # 其他区简单处理（可扩展）
+        # 暂不灰显去重/重命名等，保持可操作
 
     def _pick_move_dir(self):
         d=filedialog.askdirectory();

@@ -1,7 +1,7 @@
 import os, re, shutil
 from ..utils import norm_ext, next_non_conflict
 
-def batch_rename(files, pattern, start, step, pad_width, overwrite, remove_src, preview, out_dir, q_log):
+def batch_rename(files, pattern, start, step, pad_width, overwrite, remove_src, preview, out_dir, q_log, ratio_map=None):
     if not pattern:
         return
     idx=start
@@ -9,13 +9,20 @@ def batch_rename(files, pattern, start, step, pad_width, overwrite, remove_src, 
         if not os.path.isfile(f):
             continue
         ext=norm_ext(f); stem=os.path.splitext(os.path.basename(f))[0]
+        ratio_label=''
+        if ratio_map and f in ratio_map:
+            ratio_label=ratio_map.get(f,'')
         name_raw=pattern
         def repl_index(m):
             w=int(m.group(1)); return str(idx).zfill(w)
         name_raw=re.sub(r'\{index:(\d+)\}',repl_index,name_raw)
         if '{index}' in name_raw:
             name_raw=name_raw.replace('{index}', str(idx).zfill(pad_width) if pad_width>0 else str(idx))
-        final=name_raw.replace('{name}',stem).replace('{ext}',f'.{ext}').replace('{fmt}',ext)
+        final=(name_raw
+                .replace('{name}',stem)
+                .replace('{ext}',f'.{ext}')
+                .replace('{fmt}',ext)
+                .replace('{ratio}',ratio_label))
         if '.' not in os.path.basename(final):
             final+=f'.{ext}'
         dest=os.path.join(out_dir,final)
