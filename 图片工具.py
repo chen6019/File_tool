@@ -85,14 +85,19 @@ def next_non_conflict(path:str)->str:
 		path=f"{base}_{i}{ext}"; i+=1
 	return path
 
-def safe_delete(path:str,use_trash:bool):
-	"""删除文件: Windows 且 use_trash 时尝试送回收站, 否则直接删除."""
-	if use_trash and send2trash is not None:
+def safe_delete(path:str):
+	"""删除文件: 若可用 send2trash 则发送系统回收站/废纸篓, 否则直接删除."""
+	if send2trash is not None:
 		try:
 			send2trash(path)
 			return True,'删除->回收站'
 		except Exception as e:
-			return False,f'回收站失败:{e}'
+			# 回退到直接删除
+			try:
+				os.remove(path)
+				return True,f'删除(回收站失败:{e})'
+			except Exception as e2:
+				return False,f'删失败:{e2}'
 	try:
 		os.remove(path); return True,'删除'
 	except Exception as e:
@@ -177,15 +182,15 @@ class ImageToolApp:
 		self.frame_convert=None; self.frame_rename=None
 		self.move_dir_entry=None; self.move_dir_btn=None
 		self.dry_run=False
-		# 回收站 (Windows / Linux 桌面发送至废纸篓) 默认仅在 send2trash 可用时开启
-		self.use_trash=tk.BooleanVar(value=(send2trash is not None)) if tk else None
-		self.trash_cb=None
+		# 回收站逻辑自动化 (send2trash 可用即使用)
+		self.trash_cb=None  # 兼容旧引用
 		self.last_out_dir=None
 		self.cache_dir=None  # 预览缓存文件夹
 		self._build()
 		self.root.after(200,self._drain)
 		# 退出时清理缓存
 		self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+		self.cache_trash_dir=None  # 预览模拟回收站目录
 
 	# ---------------- UI ----------------
 	def _build(self):
@@ -232,14 +237,7 @@ class ImageToolApp:
 		cb_keep=ttk.Combobox(dedupe,textvariable=self.keep_var,values=list(KEEP_MAP.keys()),width=12,state='readonly'); cb_keep.grid(row=0,column=3,sticky='w',padx=(0,8))
 		ttk.Label(dedupe,text='动作').grid(row=0,column=4,sticky='e')
 		cb_action=ttk.Combobox(dedupe,textvariable=self.dedup_action_var,values=list(ACTION_MAP.keys()),width=10,state='readonly'); cb_action.grid(row=0,column=5,sticky='w',padx=(0,8))
-		if self.use_trash is not None:
-			self.trash_cb=ttk.Checkbutton(dedupe,text='回收站',variable=self.use_trash)
-			self.trash_cb.grid(row=0,column=6,sticky='w',padx=(0,6))
-			if send2trash is None:
-				self.trash_cb.state(['disabled'])
-				self.trash_cb.configure(text='回收站(缺依赖)')
-				self.root.after(100, lambda: self.status_var.set('缺少 send2trash, 运行: pip install send2trash'))
-		col_mv=7 if self.trash_cb else 6
+		col_mv=6
 		ttk.Label(dedupe,text='移动到').grid(row=0,column=col_mv,sticky='e')
 		self.move_dir_entry=ttk.Entry(dedupe,textvariable=self.move_dir_var,width=24); self.move_dir_entry.grid(row=0,column=col_mv+1,sticky='w')
 		self.move_dir_btn=ttk.Button(dedupe,text='选',command=self._pick_move_dir,width=4); self.move_dir_btn.grid(row=0,column=col_mv+2,sticky='w',padx=(4,0))
@@ -405,7 +403,7 @@ class ImageToolApp:
 			(cb_dedupe,'勾选执行重复检测'),(cb_convert,'勾选执行格式转换'),(cb_rename,'勾选执行重命名'),
 			(sp_workers,'并行线程数'),(btn_start,'真实执行'),(btn_preview,'仅预览不写入'),(btn_cancel,'取消执行'),
 			(sp_th,'相似阈值 0：严格 |  >0：近似'),(cb_keep,'重复组保留策略'),(cb_action,'重复文件动作'),
-			*( [(self.trash_cb,'仅删除重复时可用 (send2trash)')] if self.trash_cb else [] ),
+			# 回收站提示已移除，自动处理
 			(self.move_dir_entry,'重复文件移动目标'),(self.move_dir_btn,'选择移动目录'),
 			(cb_fmt,'目标格式'),(sc_q,'拖动调整质量'),(sp_q,'直接输入质量 1-100'),(cb_same,'同格式也重新编码'),(cb_png3,'PNG 高压缩'),(cb_rm_src_convert,'转换后删除源文件'),
 			(ent_ico,'ICO 自定义尺寸: 逗号/空格分隔 例如 24,40'),
@@ -507,12 +505,16 @@ class ImageToolApp:
 		out_dir = self.out_var.get().strip() or os.getcwd()
 		self.cache_dir = os.path.join(out_dir, '.preview_cache')
 		os.makedirs(self.cache_dir, exist_ok=True)
+		# 同时建立模拟回收站目录
+		self.cache_trash_dir=os.path.join(self.cache_dir,'_trash')
+		os.makedirs(self.cache_trash_dir, exist_ok=True)
 
 	def _clear_cache(self):
 		if self.cache_dir and os.path.exists(self.cache_dir):
 			try:
 				shutil.rmtree(self.cache_dir)
 				self.cache_dir = None
+				self.cache_trash_dir=None
 			except Exception:
 				pass
 
@@ -592,9 +594,9 @@ class ImageToolApp:
 				if action=='delete' and not self.stop_flag.is_set():
 					if self.dry_run:
 						act='删除(预览)'
+						self._simulate_delete(o.path)
 					else:
-						use_trash = bool(self.use_trash.get()) if self.use_trash is not None else False
-						ok,msg = safe_delete(o.path,use_trash)
+						ok,msg = safe_delete(o.path)
 						act=msg if ok else msg
 				elif action=='move' and move_dir and not self.stop_flag.is_set():
 					if self.dry_run:
@@ -734,10 +736,13 @@ class ImageToolApp:
 				else:
 					ok_convert,msg_convert=convert_one(src,convert_path,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False, ico_sizes if tgt=='ico' else None, self.ico_square_mode_code() if tgt=='ico' else None)
 					if ok_convert and remove_src_on_convert:
-						use_trash = bool(self.use_trash.get()) if self.use_trash is not None else False
-						ok_del, msg_del = safe_delete(src, use_trash)
+						ok_del, msg_del = safe_delete(src)
 						if not ok_del:
 							msg_convert += f' (删源失败:{msg_del})'
+				# dry_run 删除模拟（放在 need_convert 处理后）
+				if self.dry_run and remove_src_on_convert and ok_convert:
+					self._simulate_delete(src)
+					msg_convert += '+删源(预览)'
 			else:
 				# 纯重命名/复制路径
 				if self.dry_run:
@@ -750,6 +755,7 @@ class ImageToolApp:
 							msg_convert='保持(预览)'
 						elif remove_src_on_rename:
 							msg_convert='移动(预览)'
+							self._simulate_delete(src)
 						else:
 							msg_convert='复制(预览)'
 					except Exception as e:
@@ -944,6 +950,24 @@ class ImageToolApp:
 		# 调整分隔条, 让预览能完全显示
 		# 不再强制设置 sash，以允许用户手动调整日志 / 预览比例
 
+	def _simulate_delete(self, path:str):
+		"""预览模式: 将“删除”文件复制到缓存模拟回收站目录 (_trash)。"""
+		try:
+			self._ensure_cache_dir()
+			if not self.cache_trash_dir:
+				return
+			os.makedirs(self.cache_trash_dir, exist_ok=True)
+			base=os.path.basename(path)
+			target=os.path.join(self.cache_trash_dir, base)
+			# 避免同名覆盖
+			if os.path.exists(target):
+				base_no,ext=os.path.splitext(base); i=1
+				while os.path.exists(target):
+					target=os.path.join(self.cache_trash_dir, f"{base_no}_{i}{ext}"); i+=1
+			shutil.copy2(path, target)
+		except Exception:
+			pass
+
 	def _capture_log_height(self):
 		try:
 			if hasattr(self,'upper_frame') and self._log_fixed_height is None:
@@ -1049,14 +1073,7 @@ class ImageToolApp:
 		if self.move_dir_btn: \
 			self.move_dir_btn.configure(state=mv_st)
 		# 回收站复选框 (仅删除时可用)
-		if self.trash_cb is not None:
-			if send2trash is None:
-				self.trash_cb.state(['disabled'])
-			else:
-				if need_delete:
-					self.trash_cb.state(['!disabled'])
-				else:
-					self.trash_cb.state(['disabled'])
+		# 回收站复选框已移除
 
 	# Tooltips
 	def _show_tooltip(self,text,x,y):
