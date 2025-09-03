@@ -772,62 +772,85 @@ class ImageToolApp:
 				except Exception: pass
 			if warn_needed and self.ico_square_mode.get()=='keep':
 				self.q.put('STATUS 检测到非方图, ICO 可能被拉伸, 可选择裁切/填充方式')
-		for f in files:
-			src_ext=norm_ext(f)
-			tgt_fmt=fmt if self.enable_convert.get() else src_ext
-			need_convert=self.enable_convert.get() and (src_ext!=fmt or process_same)
-			orig_stem=os.path.splitext(os.path.basename(f))[0]
-			default_basename=f"{orig_stem}.{tgt_fmt}"  # 转换后默认文件名
-			# 计算最终命名 (仅当启用重命名时使用 pattern, 否则保持默认)
-			if not self.enable_rename.get():
-				name_raw=default_basename
-			else:
-				name_raw=pattern
-			# 支持 {index:03} / {index:4} 指定宽度; 若无则用 Spinbox 宽度
-			pad_width=self.index_width_var.get() if hasattr(self,'index_width_var') else 0
-			def repl_index(m):
-				w=m.group(1)
-				w_int=0
-				if w:
-					try: w_int=int(w)
-					except ValueError: w_int=0
-				use_w=w_int or pad_width
-				return str(idx).zfill(use_w) if use_w>0 else str(idx)
-			name_raw=re.sub(r'\{index:(\d+)\}', repl_index, name_raw)
-			if '{index}' in name_raw:
-				use_w=pad_width
-				name_raw=name_raw.replace('{index}', str(idx).zfill(use_w) if use_w>0 else str(idx))
-			name=name_raw.replace('{name}',orig_stem).replace('{ext}',src_ext).replace('{fmt}',tgt_fmt)
-			if '.' not in os.path.basename(name): name+=f'.{tgt_fmt}'
-			final_basename=os.path.basename(name)
-			final_path=os.path.join(out_dir,final_basename)
-			# 冲突处理针对最终文件名
-			if os.path.exists(final_path):
-				if overwrite=='skip':
-					self.q.put(f'LOG\tCONVERT\t{f}\t{final_path}\t跳过(存在)'); idx+=step; continue
-				elif overwrite=='rename':
-					final_path=next_non_conflict(final_path) if not self.dry_run else final_path+"(预览改名)"
-			# 是否需要后续重命名（仅当启用重命名且最终名不同于默认名）
-			will_rename = self.enable_rename.get() and (final_basename != default_basename)
-			# 中间转换/复制输出路径：
-			#  1) 需要转换: 中间文件=default_basename (若后续重命名) 否则直接是最终文件
-			#  2) 仅重命名: 中间文件应为 default_basename，最终文件= pattern 结果
-			if need_convert:
-				convert_basename = default_basename if will_rename else final_basename
-				convert_path = os.path.join(out_dir, convert_basename)
-				if will_rename and os.path.exists(convert_path) and convert_path!=final_path:
-					convert_path = next_non_conflict(convert_path)
-			else:
-				if will_rename:
-					convert_basename = default_basename
+		# 按目录分组以实现“分类后每个目录独立排序编号”
+		if self.enable_rename.get():
+			from collections import defaultdict
+			dir_map=defaultdict(list)
+			for f in files:
+				dir_map[os.path.dirname(f)].append(f)
+			# 每个目录单独起始 start，并递增
+			for d,flist in dir_map.items():
+				local_idx=start
+				for f in flist:
+					src_ext=norm_ext(f)
+					tgt_fmt=fmt if self.enable_convert.get() else src_ext
+					need_convert=self.enable_convert.get() and (src_ext!=fmt or process_same)
+					orig_stem=os.path.splitext(os.path.basename(f))[0]
+					default_basename=f"{orig_stem}.{tgt_fmt}"
+					name_raw=pattern
+					pad_width=self.index_width_var.get() if hasattr(self,'index_width_var') else 0
+					def repl_index(m):
+						w=m.group(1); w_int=0
+						if w:
+							try: w_int=int(w)
+							except ValueError: w_int=0
+						use_w=w_int or pad_width
+						return str(local_idx).zfill(use_w) if use_w>0 else str(local_idx)
+					name_raw=re.sub(r'\{index:(\d+)\}', repl_index, name_raw)
+					if '{index}' in name_raw:
+						use_w=pad_width
+						name_raw=name_raw.replace('{index}', str(local_idx).zfill(use_w) if use_w>0 else str(local_idx))
+					name=name_raw.replace('{name}',orig_stem).replace('{ext}',src_ext).replace('{fmt}',tgt_fmt)
+					if '.' not in os.path.basename(name): name+=f'.{tgt_fmt}'
+					final_basename=os.path.basename(name)
+					final_path=os.path.join(out_dir,final_basename)
+					if os.path.exists(final_path):
+						if overwrite=='skip':
+							self.q.put(f'LOG\tCONVERT\t{f}\t{final_path}\t跳过(存在)'); local_idx+=step; continue
+						elif overwrite=='rename':
+							final_path=next_non_conflict(final_path) if not self.dry_run else final_path+"(预览改名)"
+					will_rename = (final_basename != default_basename)
+					if need_convert:
+						convert_basename = default_basename if will_rename else final_basename
+						convert_path = os.path.join(out_dir, convert_basename)
+						if will_rename and os.path.exists(convert_path) and convert_path!=final_path:
+							convert_path = next_non_conflict(convert_path)
+					else:
+						if will_rename:
+							convert_basename = default_basename
+							convert_path = os.path.join(out_dir, convert_basename)
+							if os.path.exists(convert_path) and convert_path!=final_path:
+								convert_path = next_non_conflict(convert_path)
+						else:
+							convert_basename = final_basename
+							convert_path = final_path
+					tasks.append((f,need_convert,tgt_fmt,convert_path,final_path,will_rename,convert_basename,final_basename,local_idx))
+					local_idx+=step
+		else:
+			# 不启用重命名则保持原逻辑（全局顺序，但不使用 pattern）
+			for f in files:
+				src_ext=norm_ext(f)
+				tgt_fmt=fmt if self.enable_convert.get() else src_ext
+				need_convert=self.enable_convert.get() and (src_ext!=fmt or process_same)
+				orig_stem=os.path.splitext(os.path.basename(f))[0]
+				default_basename=f"{orig_stem}.{tgt_fmt}"
+				name=default_basename
+				final_basename=os.path.basename(name)
+				final_path=os.path.join(out_dir,final_basename)
+				if os.path.exists(final_path):
+					if overwrite=='skip':
+						self.q.put(f'LOG\tCONVERT\t{f}\t{final_path}\t跳过(存在)'); idx+=step; continue
+					elif overwrite=='rename':
+						final_path=next_non_conflict(final_path) if not self.dry_run else final_path+"(预览改名)"
+				will_rename=False
+				if need_convert:
+					convert_basename = final_basename
 					convert_path = os.path.join(out_dir, convert_basename)
-					if os.path.exists(convert_path) and convert_path!=final_path:
-						convert_path = next_non_conflict(convert_path)
 				else:
 					convert_basename = final_basename
 					convert_path = final_path
-			tasks.append((f,need_convert,tgt_fmt,convert_path,final_path,will_rename,convert_basename,final_basename,idx))
-			idx+=step
+				tasks.append((f,need_convert,tgt_fmt,convert_path,final_path,will_rename,convert_basename,final_basename,idx))
+				idx+=step
 		total=len(tasks); self.q.put(f'STATUS 转换/重命名 共{total}')
 		done=0; lock=threading.Lock(); final_paths=[]
 		def job(spec):
