@@ -527,11 +527,8 @@ class ImageToolApp:
 			self._clear_cache()
 			self._ensure_cache_dir()
 		else:
-			# 尝试快速提交
-			if self._maybe_fast_commit():
-				return
-			# 非快速路径需清除旧缓存
-			self._clear_cache()
+				# 直接清除旧缓存 (取消快速提交逻辑)
+				self._clear_cache()
 		inp=self.in_var.get().strip()
 		if not inp: self.status_var.set('未选择输入'); return
 		self.single_file_mode=False
@@ -1078,46 +1075,6 @@ class ImageToolApp:
 		parts.extend(files)
 		digest=hashlib.md5('\n'.join(map(str,parts)).encode('utf-8','ignore')).hexdigest()
 		return digest
-
-	def _maybe_fast_commit(self)->bool:
-		"""若存在与当前参数完全一致的预览结果, 直接复制 _final 到真实输出, 跳过重新执行。"""
-		if not self._last_preview_signature or not self.cache_final_dir:
-			return False
-		# 当前签名
-		try:
-			current_sig=self._calc_preview_signature()
-		except Exception:
-			return False
-		if current_sig!=self._last_preview_signature:
-			return False
-		# 复制
-		out_dir=self.out_var.get().strip() or (self.in_var.get().strip() or os.getcwd())
-		os.makedirs(out_dir,exist_ok=True)
-		# 遍历 _final
-		to_copy=[]
-		for root,dirs,files in os.walk(self.cache_final_dir):
-			rel=os.path.relpath(root,self.cache_final_dir)
-			for f in files:
-				src=os.path.join(root,f)
-				if rel=='.':
-					dst=os.path.join(out_dir,f)
-				else:
-					dst=os.path.join(out_dir,rel,f)
-				to_copy.append((src,dst))
-		self.q.put(f'STATUS 快速应用 {len(to_copy)} 文件')
-		copied=0
-		for src,dst in to_copy:
-			if self.stop_flag.is_set(): break
-			os.makedirs(os.path.dirname(dst),exist_ok=True)
-			try:
-				shutil.copy2(src,dst)
-				self.q.put(f'LOG\tRENAME\t{src}\t{dst}\t快速复制')
-				copied+=1
-			except Exception as e:
-				self.q.put(f'LOG\tRENAME\t{src}\t{dst}\t快速失败:{e}')
-			self.q.put(f'PROG {copied} {len(to_copy)}')
-		self.q.put('STATUS 完成(快速)')
-		return True
 
 	def _convert_stage_only(self, files:list[str])->list[str]:
 		fmt=FMT_MAP.get(self.fmt_var.get(),'png')
