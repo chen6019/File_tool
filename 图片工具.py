@@ -169,7 +169,15 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 				im.save(dst, fmt.upper(), **params)
 		return True,'OK'
 	except Exception as e:
-		return False,str(e)
+		import traceback
+		# 返回详细的错误信息，包含异常类型和堆栈
+		error_detail = f"{type(e).__name__}: {str(e)}"
+		# 添加关键的堆栈信息（最后几行）
+		tb_lines = traceback.format_exc().strip().split('\n')
+		if len(tb_lines) > 2:
+			# 取最后的错误行
+			error_detail += f" | {tb_lines[-2].strip()}"
+		return False, error_detail
 
 @dataclass
 class ImgInfo:
@@ -917,9 +925,14 @@ class ImageToolApp:
 				if self.dry_run:
 					# 实际执行一次到缓存，保证可预览
 					ok_convert,msg_convert=convert_one(src,convert_path,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False, ico_sizes if tgt=='ico' else None, self.ico_square_mode_code() if tgt=='ico' else None)
-					msg_convert = ('转换(预览)' if ok_convert else '转换失败(预览)')
+					if ok_convert:
+						msg_convert = '转换(预览)'
+					else:
+						msg_convert = f'转换失败(预览):{msg_convert}'
 				else:
 					ok_convert,msg_convert=convert_one(src,convert_path,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False, ico_sizes if tgt=='ico' else None, self.ico_square_mode_code() if tgt=='ico' else None)
+					if not ok_convert:
+						msg_convert = f'转换失败:{msg_convert}'
 					if ok_convert and remove_src_on_convert:
 						ok_del, msg_del = safe_delete(src)
 						if not ok_del:
@@ -1208,7 +1221,10 @@ class ImageToolApp:
 				try: safe_delete(f)
 				except Exception: pass
 			with lock:
-				self.q.put(f'LOG\tCONVERT\t{f}\t{dest}\t{"转换" if ok else "转换失败"}')
+				if ok:
+					self.q.put(f'LOG\tCONVERT\t{f}\t{dest}\t转换')
+				else:
+					self.q.put(f'LOG\tCONVERT\t{f}\t{dest}\t转换失败:{msg}')
 				results[i]= dest if ok else f
 				done+=1; self.q.put(f'PROG {done} {total}')
 		if workers>1 and len(files)>1:
