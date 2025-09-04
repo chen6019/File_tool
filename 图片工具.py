@@ -450,13 +450,15 @@ class ImageToolApp:
 		prev.rowconfigure(0,weight=1)
 		# BEFORE
 		before_frame=ttk.Frame(prev,padding=2); before_frame.grid(row=0,column=0,sticky='nsew')
-		before_frame.columnconfigure(0,weight=1); before_frame.rowconfigure(0,weight=1)
-		self.preview_before_label=ttk.Label(before_frame,text='(源)'); self.preview_before_label.grid(row=0,column=0,sticky='nsew')
+		before_frame.columnconfigure(0,weight=1)
+		before_frame.rowconfigure(0,weight=1)
+		self.preview_before_label=ttk.Label(before_frame,text='(源)'); self.preview_before_label.grid(row=0,column=0,sticky='n')
 		self.preview_before_info=tk.StringVar(value=''); ttk.Label(before_frame,textvariable=self.preview_before_info,foreground='gray').grid(row=1,column=0,sticky='we')
 		# AFTER
 		after_frame=ttk.Frame(prev,padding=2); after_frame.grid(row=0,column=1,sticky='nsew')
-		after_frame.columnconfigure(0,weight=1); after_frame.rowconfigure(0,weight=1)
-		self.preview_after_label=ttk.Label(after_frame,text='(结果)'); self.preview_after_label.grid(row=0,column=0,sticky='nsew')
+		after_frame.columnconfigure(0,weight=1)
+		after_frame.rowconfigure(0,weight=1)
+		self.preview_after_label=ttk.Label(after_frame,text='(结果)'); self.preview_after_label.grid(row=0,column=0,sticky='n')
 		self.preview_after_info=tk.StringVar(value=''); ttk.Label(after_frame,textvariable=self.preview_after_info,foreground='gray').grid(row=1,column=0,sticky='we')
 		# 兼容旧属性引用
 		self.preview_label=self.preview_after_label
@@ -464,7 +466,7 @@ class ImageToolApp:
 		# 自动调整窗口大小选项
 		self.auto_resize_window=tk.BooleanVar(value=False)
 		cb_auto=ttk.Checkbutton(prev,text='随图自调',variable=self.auto_resize_window)
-		cb_auto.grid(row=2,column=0,sticky='w',pady=(2,0))
+		cb_auto.grid(row=2,column=0,columnspan=2,sticky='w',pady=(2,0))  # 跨越两列以保持对称
 		self._last_auto_size=None
 		self.auto_resize_window.trace_add('write', lambda *a: self._maybe_resize_window())
 		# 事件
