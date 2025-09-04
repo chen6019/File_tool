@@ -1493,24 +1493,29 @@ class ImageToolApp:
 		# 在左侧显示源文件名
 		self.preview_before_label.configure(
 			text=f"源文件: {src_basename}",
-			image=''
+			image='',
+			wraplength=380,  # 设置文本换行宽度
+			justify='left'   # 左对齐
 		)
 		self.preview_before_info.set('')
 		
 		# 在右侧显示错误详情
 		# 处理长错误信息，适当换行
 		error_text = f"错误详情:\n{error_info}"
-		if len(error_text) > 300:
+		if len(error_text) > 500:
 			# 对于很长的错误信息，进行适当截断并保留重要部分
 			lines = error_text.split('\n')
-			if len(lines) > 8:
-				error_text = '\n'.join(lines[:4] + ['...'] + lines[-2:])
-			elif len(error_text) > 300:
-				error_text = error_text[:300] + '...'
+			if len(lines) > 10:
+				error_text = '\n'.join(lines[:5] + ['...'] + lines[-3:])
+			elif len(error_text) > 500:
+				error_text = error_text[:500] + '...'
 		
 		self.preview_after_label.configure(
 			text=error_text,
-			image=''
+			image='',
+			wraplength=380,  # 设置文本换行宽度
+			justify='left',  # 左对齐
+			anchor='nw'      # 内容对齐到左上角
 		)
 		self.preview_after_info.set('处理失败')
 
