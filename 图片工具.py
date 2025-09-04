@@ -405,6 +405,8 @@ class ImageToolApp:
 		cb_fail.pack(side='left',padx=(6,0))
 		btn_reset=ttk.Button(filter_bar,text='重置',width=6,command=lambda: self._reset_log_filter())
 		btn_reset.pack(side='right',padx=(4,0))
+		btn_open_log=ttk.Button(filter_bar,text='打开日志',width=8,command=self._open_program_log)
+		btn_open_log.pack(side='right',padx=(4,0))
 		# 绑定变更实时刷新
 		self.log_filter_stage.trace_add('write', self._on_change_log_filter)
 		self.log_filter_kw.trace_add('write', self._on_change_log_filter)
@@ -592,6 +594,26 @@ class ImageToolApp:
 		except Exception as e:
 			self.status_var.set(f'打开失败:{e}')
 
+	def _open_program_log(self):
+		"""打开程序日志文件查看详细错误信息"""
+		try:
+			self._ensure_cache_dir()
+			if not self.cache_dir:
+				self.status_var.set('缓存目录未创建'); return
+			log_path = os.path.join(self.cache_dir, 'program.log')
+			if not os.path.exists(log_path):
+				self.status_var.set('日志文件不存在'); return
+			
+			if sys.platform.startswith('win'):
+				os.startfile(log_path)  # type: ignore
+			elif sys.platform=='darwin':
+				subprocess.Popen(['open', log_path])
+			else:
+				subprocess.Popen(['xdg-open', log_path])
+			self.status_var.set('已打开程序日志')
+		except Exception as e:
+			self.status_var.set(f'打开日志失败:{e}')
+
 	def _ensure_cache_dir(self):
 		if self.cache_dir and os.path.exists(self.cache_dir):
 			return
@@ -674,7 +696,10 @@ class ImageToolApp:
 				self._last_preview_signature=self._calc_preview_signature()
 				self._last_preview_files=[(p, os.path.getmtime(p), os.path.getsize(p)) for p in self._all_files if os.path.isfile(p)]
 		except Exception as e:
-			self.q.put(f'STATUS 失败: {e}')
+			import traceback
+			full_error = f"{str(e)} | {traceback.format_exc()}"
+			self.q.put(f'STATUS 失败: {full_error}')
+			print(f"[CRITICAL ERROR] Pipeline failed: {full_error}")
 		finally:
 			self.dry_run=False
 
@@ -919,7 +944,9 @@ class ImageToolApp:
 						else:
 							msg_convert='复制(预览)'
 					except Exception as e:
-						ok_convert=False; msg_convert=f'复制失败(预览):{e}'
+						import traceback
+						error_detail = f"{str(e)} | {traceback.format_exc().replace(chr(10), ' | ')}"
+						ok_convert=False; msg_convert=f'复制失败(预览):{error_detail}'
 				else:
 					try:
 						if os.path.abspath(src)==os.path.abspath(convert_path):
@@ -929,7 +956,9 @@ class ImageToolApp:
 						else:
 							shutil.copy2(src,convert_path); ok_convert=True; msg_convert='复制'
 					except Exception as e:
-						ok_convert=False; msg_convert=f'复制失败:{e}'
+						import traceback
+						error_detail = f"{str(e)} | {traceback.format_exc().replace(chr(10), ' | ')}"
+						ok_convert=False; msg_convert=f'复制失败:{error_detail}'
 			# 如果需要重命名(第二阶段)
 			msg_rename=''; ok_rename=True
 			if will_rename:
@@ -1063,7 +1092,9 @@ class ImageToolApp:
 				self.q.put(f'LOG\tCLASSIFY\t{p}\t{dest}\t比例分类->{label}')
 				res_path=dest
 			except Exception as e:
-				self.q.put(f'LOG\tCLASSIFY\t{p}\t{p}\t比例分类失败:{e}')
+				import traceback
+				error_detail = f"{str(e)} | Traceback: {traceback.format_exc().replace(chr(10), ' | ')}"
+				self.q.put(f'LOG\tCLASSIFY\t{p}\t{p}\t比例分类失败:{error_detail}')
 				res_path=p
 			with lock:
 				done+=1
@@ -1274,7 +1305,9 @@ class ImageToolApp:
 					shutil.copy2(f,dest)
 			self.q.put(f'LOG\tRENAME\t{f}\t{dest}\t重命名')
 		except Exception as e:
-			self.q.put(f'LOG\tRENAME\t{f}\t{dest}\t失败:{e}')
+			import traceback
+			error_detail = f"{str(e)} | Traceback: {traceback.format_exc().replace(chr(10), ' | ')}"
+			self.q.put(f'LOG\tRENAME\t{f}\t{dest}\t失败:{error_detail}')
 		return idx + step
 
 	# (删除重复的旧 _ratio_classify_stage 定义)
@@ -1317,6 +1350,11 @@ class ImageToolApp:
 						if stage=='RENAME' and info.startswith('重命名 - '):
 							stag='STAGE_RENAME'
 						elif '保留' in info: stag='STAGE_KEEP'
+						
+						# 对于失败消息，在控制台打印完整信息
+						if '失败' in info:
+							print(f"[ERROR] {stage} | {src} -> {dst} | {info}")
+						
 						vals=(stage_disp, os.path.basename(src), os.path.basename(dst), info)
 						row_tags=(src,dst,stag)
 						self._raw_logs.append((stage,src,dst,info,vals,row_tags))
