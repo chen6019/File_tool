@@ -1421,6 +1421,9 @@ class ImageToolApp:
 		result_path=first_exist(dst_candidates)
 		# 加载函数
 		def load_to(label,info_var,path,placeholder,base_root):
+			# 清除文本模式标记
+			if hasattr(label, '_text_mode'):
+				label._text_mode = False
 			if not path:
 				label.configure(text=placeholder,image=''); info_var.set(''); return (0,0)
 			try:
@@ -1459,12 +1462,35 @@ class ImageToolApp:
 		bh = photo_b.height() if photo_b else 0
 		aw = photo_a.width() if photo_a else 0
 		ah = photo_a.height() if photo_a else 0
-		if (bw==0 and aw==0):
+		
+		# 检查是否为文本模式（显示错误信息）
+		text_mode = getattr(self.preview_after_label, '_text_mode', False)
+		
+		if (bw==0 and aw==0) and not text_mode:
 			return
+		
+		# 计算内容高度
+		if text_mode:
+			# 文本模式：估算文本高度
+			text_content = self.preview_after_label.cget('text')
+			if text_content:
+				# 根据文本行数和换行宽度估算高度
+				lines = text_content.count('\n') + 1
+				# 考虑自动换行的影响
+				char_per_line = 50  # 大致每行字符数
+				total_chars = len(text_content)
+				wrapped_lines = max(lines, total_chars // char_per_line + 1)
+				estimated_height = min(wrapped_lines * 18, 300)  # 每行约18像素，最大300像素
+				img_h = max(estimated_height, 150)  # 最小150像素高度
+			else:
+				img_h = 150  # 默认高度
+		else:
+			# 图片模式：使用图片高度
+			img_h=max(bh,ah)
+		
 		# 只调整高度: 计算需要的总高度
 		root_y0=self.root.winfo_rooty()
 		preview_top = self.preview_before_label.winfo_rooty()-root_y0
-		img_h=max(bh,ah)
 		extra_h=110  # info 行 + 边距
 		desired_h=preview_top+img_h+extra_h
 		sh=self.root.winfo_screenheight(); margin=50
@@ -1518,6 +1544,10 @@ class ImageToolApp:
 			anchor='nw'      # 内容对齐到左上角
 		)
 		self.preview_after_info.set('处理失败')
+		
+		# 标记为文本模式，并调用窗口调整
+		self.preview_after_label._text_mode = True
+		self._maybe_resize_window()
 
 	def _simulate_delete(self, path:str):
 		"""预览模式: 将“删除”文件复制到缓存模拟回收站目录 (_trash)。"""
