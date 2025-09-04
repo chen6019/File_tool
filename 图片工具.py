@@ -464,7 +464,7 @@ class ImageToolApp:
 		self.preview_label=self.preview_after_label
 		self.preview_info=self.preview_after_info
 		# 自动调整窗口大小选项
-		self.auto_resize_window=tk.BooleanVar(value=False)
+		self.auto_resize_window=tk.BooleanVar(value=True)
 		cb_auto=ttk.Checkbutton(prev,text='随图自调',variable=self.auto_resize_window)
 		cb_auto.grid(row=2,column=0,columnspan=2,sticky='w',pady=(2,0))  # 跨越两列以保持对称
 		self._last_auto_size=None
@@ -935,7 +935,12 @@ class ImageToolApp:
 					ok_convert,msg_convert=convert_one(src,convert_path,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False, ico_sizes if tgt=='ico' else None, self.ico_square_mode_code() if tgt=='ico' else None)
 					if not ok_convert:
 						msg_convert = f'转换失败:{msg_convert}'
-					if ok_convert and remove_src_on_convert:
+						# 转换失败且需要删源：处理失败文件
+						if remove_src_on_convert:
+							failed_path = self._handle_failed_file(src, msg_convert, True)
+							if failed_path:
+								msg_convert += f" (文件已移至失败文件夹)"
+					elif ok_convert and remove_src_on_convert:
 						ok_del, msg_del = safe_delete(src)
 						if not ok_del:
 							msg_convert += f' (删源失败:{msg_del})'
@@ -1222,12 +1227,17 @@ class ImageToolApp:
 			if ok and remove_src_on_convert and not preview:
 				try: safe_delete(f)
 				except Exception: pass
+			elif not ok and remove_src_on_convert:
+				# 转换失败但需要删源：将失败文件移动到失败文件夹
+				failed_path = self._handle_failed_file(f, msg, True)
+				if failed_path:
+					msg += f" (文件已移至失败文件夹)"
 			with lock:
 				if ok:
 					self.q.put(f'LOG\tCONVERT\t{f}\t{dest}\t转换')
 				else:
 					self.q.put(f'LOG\tCONVERT\t{f}\t{dest}\t转换失败:{msg}')
-				results[i]= dest if ok else f
+				results[i]= dest if ok else None  # 失败的文件不传递到下一阶段
 				done+=1; self.q.put(f'PROG {done} {total}')
 		if workers>1 and len(files)>1:
 			with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -1325,6 +1335,11 @@ class ImageToolApp:
 		except Exception as e:
 			import traceback
 			error_detail = f"{str(e)} | Traceback: {traceback.format_exc().replace(chr(10), ' | ')}"
+			# 重命名失败且需要删源：处理失败文件
+			if remove_src:
+				failed_path = self._handle_failed_file(f, error_detail, True)
+				if failed_path:
+					error_detail += f" (文件已移至失败文件夹)"
 			self.q.put(f'LOG\tRENAME\t{f}\t{dest}\t失败:{error_detail}')
 		return idx + step
 
@@ -1550,6 +1565,49 @@ class ImageToolApp:
 		# 标记为文本模式，并调用窗口调整
 		self.preview_after_label._text_mode = True
 		self._maybe_resize_window()
+
+	def _handle_failed_file(self, src_path, reason, should_remove_src=False):
+		"""处理失败的文件：如果设置了删源，将失败文件移动到失败文件夹"""
+		if not should_remove_src:
+			return  # 不需要删源就不处理
+		
+		try:
+			# 确定失败文件夹路径
+			if self.dry_run:
+				# 预览模式：放到缓存目录下的failed文件夹
+				self._ensure_cache_dir()
+				failed_dir = os.path.join(self.cache_dir, 'failed')
+			else:
+				# 实际模式：放到输出目录下的failed文件夹
+				out_dir = self.out_var.get().strip() or self.in_var.get().strip()
+				failed_dir = os.path.join(out_dir, 'failed')
+			
+			os.makedirs(failed_dir, exist_ok=True)
+			
+			# 避免文件名冲突
+			basename = os.path.basename(src_path)
+			dst_path = os.path.join(failed_dir, basename)
+			if os.path.exists(dst_path):
+				base_no, ext = os.path.splitext(basename)
+				i = 1
+				while os.path.exists(dst_path):
+					dst_path = os.path.join(failed_dir, f"{base_no}_{i}{ext}")
+					i += 1
+			
+			if self.dry_run:
+				# 预览模式：复制到失败文件夹
+				shutil.copy2(src_path, dst_path)
+				# 同时模拟删除原文件
+				self._simulate_delete(src_path)
+			else:
+				# 实际模式：移动到失败文件夹
+				shutil.move(src_path, dst_path)
+			
+			return dst_path
+		except Exception as e:
+			# 如果移动失败文件也失败了，至少记录一下
+			print(f"[ERROR] Failed to handle failed file {src_path}: {e}")
+			return None
 
 	def _simulate_delete(self, path:str):
 		"""预览模式: 将“删除”文件复制到缓存模拟回收站目录 (_trash)。"""
