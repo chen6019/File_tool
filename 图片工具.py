@@ -1193,66 +1193,89 @@ class ImageToolApp:
 	def _rename_stage_only(self, files:list[str]):
 		pattern=self.pattern_var.get().strip()
 		if not pattern: return
-		start=self.start_var.get(); step=self.step_var.get(); idx=start
+		start=self.start_var.get(); step=self.step_var.get()
 		pad_width=self.index_width_var.get(); overwrite=OVERWRITE_MAP.get(self.overwrite_var.get(),'overwrite')
 		remove_src=self.rename_remove_src.get(); preview=self.dry_run
 		real_out=self.out_var.get().strip() or self.in_var.get().strip()
 		out_dir=(self.cache_final_dir or self.cache_dir) if preview else real_out
 		# 若文件在分类子目录内，保持相对目录
 		class_root=(self.cache_dir if preview else real_out)
-		# 支持 {ratio} 占位符: 根据已存在目录(分类阶段结果)推断; 若无则尝试从父目录名识别
-		for f in files:
-			if self.stop_flag.is_set(): break
-			if not os.path.isfile(f): continue
-			ext=norm_ext(f); stem=os.path.splitext(os.path.basename(f))[0]
-			name_raw=pattern
-			def repl_index(m):
-				w=int(m.group(1)); return str(idx).zfill(w)
-			name_raw=re.sub(r'\{index:(\d+)\}', repl_index, name_raw)
-			if '{index}' in name_raw:
-				name_raw=name_raw.replace('{index}', str(idx).zfill(pad_width) if pad_width>0 else str(idx))
-			# ratio 占位
-			ratio_label=''
-			parent=os.path.basename(os.path.dirname(f))
-			if re.match(r'^\d+x\d+$', parent): ratio_label=parent
-			if not ratio_label:
-				match=re.search(r'(\d+)x(\d+)', stem)
-				if match:
-					ratio_label=f"{match.group(1)}x{match.group(2)}"
-			name_raw=name_raw.replace('{ratio}', ratio_label or 'ratio')
-			final_name=(name_raw.replace('{name}',stem).replace('{ext}',f'.{ext}').replace('{fmt}',ext))
-			if '.' not in os.path.basename(final_name):
-				final_name+=f'.{ext}'
-			# 分类相对目录
-			rel_dir=os.path.relpath(os.path.dirname(f), class_root)
-			if rel_dir=='.': rel_dir=''
-			target_dir=os.path.join(out_dir, rel_dir)
-			os.makedirs(target_dir, exist_ok=True)
-			dest=os.path.join(target_dir, final_name)
-			if os.path.abspath(dest)==os.path.abspath(f):
-				idx+=step; continue
-			if os.path.exists(dest):
-				if overwrite=='skip':
-					self.q.put(f'LOG\tRENAME\t{f}\t{dest}\t跳过(存在)'); idx+=step; continue
-				elif overwrite=='rename':
-					if not preview:
-						dest=next_non_conflict(dest)
-					else:
-						dest=dest+'(预览改名)'
-			try:
-				if preview:
-					shutil.copy2(f,dest)
-					if remove_src and os.path.exists(f):
-						self._simulate_delete(f)
+		
+		# 按目录分组，每个目录独立编号（如果启用了分类）
+		if self.classify_ratio_var.get():
+			from collections import defaultdict
+			dir_groups = defaultdict(list)
+			for f in files:
+				dir_key = os.path.dirname(f)
+				dir_groups[dir_key].append(f)
+			
+			# 对每个目录单独处理
+			for dir_path, dir_files in dir_groups.items():
+				idx = start  # 每个目录从起始序号开始
+				for f in dir_files:
+					if self.stop_flag.is_set(): break
+					if not os.path.isfile(f): continue
+					idx = self._process_rename_file(f, pattern, idx, step, pad_width, overwrite, remove_src, preview, out_dir, class_root)
+		else:
+			# 未启用分类时保持原逻辑
+			idx = start
+			for f in files:
+				if self.stop_flag.is_set(): break
+				if not os.path.isfile(f): continue
+				idx = self._process_rename_file(f, pattern, idx, step, pad_width, overwrite, remove_src, preview, out_dir, class_root)
+
+	def _process_rename_file(self, f, pattern, idx, step, pad_width, overwrite, remove_src, preview, out_dir, class_root):
+		"""处理单个文件的重命名，返回下一个索引值"""
+		ext=norm_ext(f); stem=os.path.splitext(os.path.basename(f))[0]
+		name_raw=pattern
+		def repl_index(m):
+			w=int(m.group(1)); return str(idx).zfill(w)
+		name_raw=re.sub(r'\{index:(\d+)\}', repl_index, name_raw)
+		if '{index}' in name_raw:
+			name_raw=name_raw.replace('{index}', str(idx).zfill(pad_width) if pad_width>0 else str(idx))
+		# ratio 占位
+		ratio_label=''
+		parent=os.path.basename(os.path.dirname(f))
+		if re.match(r'^\d+x\d+$', parent): ratio_label=parent
+		if not ratio_label:
+			match=re.search(r'(\d+)x(\d+)', stem)
+			if match:
+				ratio_label=f"{match.group(1)}x{match.group(2)}"
+		name_raw=name_raw.replace('{ratio}', ratio_label or 'ratio')
+		final_name=(name_raw.replace('{name}',stem).replace('{ext}',f'.{ext}').replace('{fmt}',ext))
+		if '.' not in os.path.basename(final_name):
+			final_name+=f'.{ext}'
+		# 分类相对目录
+		rel_dir=os.path.relpath(os.path.dirname(f), class_root)
+		if rel_dir=='.': rel_dir=''
+		target_dir=os.path.join(out_dir, rel_dir)
+		os.makedirs(target_dir, exist_ok=True)
+		dest=os.path.join(target_dir, final_name)
+		if os.path.abspath(dest)==os.path.abspath(f):
+			return idx + step
+		if os.path.exists(dest):
+			if overwrite=='skip':
+				self.q.put(f'LOG\tRENAME\t{f}\t{dest}\t跳过(存在)')
+				return idx + step
+			elif overwrite=='rename':
+				if not preview:
+					dest=next_non_conflict(dest)
 				else:
-					if remove_src:
-						shutil.move(f,dest)
-					else:
-						shutil.copy2(f,dest)
-				self.q.put(f'LOG\tRENAME\t{f}\t{dest}\t重命名')
-			except Exception as e:
-				self.q.put(f'LOG\tRENAME\t{f}\t{dest}\t失败:{e}')
-			idx+=step
+					dest=dest+'(预览改名)'
+		try:
+			if preview:
+				shutil.copy2(f,dest)
+				if remove_src and os.path.exists(f):
+					self._simulate_delete(f)
+			else:
+				if remove_src:
+					shutil.move(f,dest)
+				else:
+					shutil.copy2(f,dest)
+			self.q.put(f'LOG\tRENAME\t{f}\t{dest}\t重命名')
+		except Exception as e:
+			self.q.put(f'LOG\tRENAME\t{f}\t{dest}\t失败:{e}')
+		return idx + step
 
 	# (删除重复的旧 _ratio_classify_stage 定义)
 
