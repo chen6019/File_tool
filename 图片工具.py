@@ -1392,6 +1392,12 @@ class ImageToolApp:
 		tags = self.log.item(sel[0],'tags') or []  # (src_full, dst_full, stage_tag)
 		src_full = tags[0] if len(tags)>=1 else ''
 		dst_full_logged = tags[1] if len(tags)>=2 else ''
+		
+		# 检测失败项并显示错误信息
+		if "失败" in info:
+			self._show_error_in_preview(src_basename, info)
+			return
+		
 		# 源与结果路径推断
 		if self.dry_run:
 			# 缓存中的结果
@@ -1477,6 +1483,36 @@ class ImageToolApp:
 				pass
 		# 调整分隔条, 让预览能完全显示
 		# 不再强制设置 sash，以允许用户手动调整日志 / 预览比例
+
+	def _show_error_in_preview(self, src_basename, error_info):
+		"""在预览区域显示错误信息"""
+		# 清除图片引用
+		self.preview_before_label._img_ref = None
+		self.preview_after_label._img_ref = None
+		
+		# 在左侧显示源文件名
+		self.preview_before_label.configure(
+			text=f"源文件: {src_basename}",
+			image=''
+		)
+		self.preview_before_info.set('')
+		
+		# 在右侧显示错误详情
+		# 处理长错误信息，适当换行
+		error_text = f"错误详情:\n{error_info}"
+		if len(error_text) > 300:
+			# 对于很长的错误信息，进行适当截断并保留重要部分
+			lines = error_text.split('\n')
+			if len(lines) > 8:
+				error_text = '\n'.join(lines[:4] + ['...'] + lines[-2:])
+			elif len(error_text) > 300:
+				error_text = error_text[:300] + '...'
+		
+		self.preview_after_label.configure(
+			text=error_text,
+			image=''
+		)
+		self.preview_after_info.set('处理失败')
 
 	def _simulate_delete(self, path:str):
 		"""预览模式: 将“删除”文件复制到缓存模拟回收站目录 (_trash)。"""
