@@ -628,6 +628,21 @@ class ImageToolApp:
 		except Exception as e:
 			self.status_var.set(f'打开日志失败:{e}')
 
+	def _set_hidden_attribute(self, path):
+		"""设置文件/文件夹的隐藏属性"""
+		try:
+			if sys.platform.startswith('win'):
+				# Windows系统使用attrib命令设置隐藏属性
+				import subprocess
+				subprocess.run(['attrib', '+H', path], capture_output=True, check=False)
+			else:
+				# 非Windows系统，文件名以.开头通常被认为是隐藏的
+				# 这里不需要额外操作，因为.preview_cache已经是以.开头
+				pass
+		except Exception:
+			# 设置隐藏属性失败不影响主要功能
+			pass
+
 	def _ensure_cache_dir(self):
 		if self.cache_dir and os.path.exists(self.cache_dir):
 			return
@@ -637,6 +652,10 @@ class ImageToolApp:
 		if os.path.basename(self.cache_dir)=='_final':
 			self.cache_dir=os.path.dirname(self.cache_dir)
 		os.makedirs(self.cache_dir, exist_ok=True)
+		
+		# 设置缓存目录为隐藏属性
+		self._set_hidden_attribute(self.cache_dir)
+		
 		# 同时建立模拟回收站目录
 		self.cache_trash_dir=os.path.join(self.cache_dir,'_trash')
 		os.makedirs(self.cache_trash_dir, exist_ok=True)
