@@ -374,8 +374,8 @@ class ImageToolApp:
 		btn_out=ttk.Button(io,text='选择',command=self._pick_out,width=6); btn_out.grid(row=0,column=7,padx=(2,0))
 		btn_open_out=ttk.Button(io,text='打开',command=self._open_last_out,width=6); btn_open_out.grid(row=0,column=8,padx=(4,0))
 		
-		# 跳过格式设置 (全局输入过滤)
-		skip_frame=ttk.LabelFrame(outer,text='跳过格式'); skip_frame.pack(fill='x',pady=(0,6))
+		# 跳过(过滤)功能设置 (全局输入过滤)
+		skip_frame=ttk.LabelFrame(outer,text='跳过(过滤)功能'); skip_frame.pack(fill='x',pady=(0,6))
 		skip_enable_frame = ttk.Frame(skip_frame)
 		skip_enable_frame.pack(fill='x', pady=(4,2))
 		skip_enable_cb = ttk.Checkbutton(skip_enable_frame, text='启用跳过功能', variable=self.skip_formats_enabled, command=self._toggle_skip_formats)
@@ -1607,6 +1607,50 @@ class ImageToolApp:
 		process_same=self.process_same_var.get(); quality=self.quality_var.get(); png3=self.png3_var.get()
 		pattern=self.pattern_var.get(); start=self.start_var.get(); step=self.step_var.get()
 		overwrite=OVERWRITE_MAP.get(self.overwrite_var.get(),'overwrite')
+		
+		# 处理跳过逻辑
+		filtered_files = []
+		if self.skip_formats_enabled.get():
+			if self.skip_convert_only.get():
+				# 单勾选"仅格式转换跳过"时，跳过的文件不转换但需要重命名
+				skip_formats = self._get_skip_formats(for_convert_only=True)
+				skipped_for_rename = []  # 跳过转换但需重命名的文件
+				for f in files:
+					try:
+						with Image.open(f) as img:
+							file_format = img.format
+							if file_format and file_format.upper() in skip_formats:
+								# 跳过转换，但添加到重命名列表
+								skipped_for_rename.append(f)
+								continue
+					except (IOError, OSError):
+						# 无法读取的文件继续处理
+						pass
+					filtered_files.append(f)
+				# 在最后合并需要重命名的跳过文件
+			else:
+				# 未勾选"仅格式转换跳过"但启用跳过格式功能时，跳过的文件既不转换也不重命名
+				skip_formats = self._get_skip_formats(for_convert_only=False)
+				skipped_count = 0
+				for f in files:
+					try:
+						with Image.open(f) as img:
+							file_format = img.format
+							if file_format and file_format.upper() in skip_formats:
+								skipped_count += 1
+								# 完全跳过此文件
+								continue
+					except (IOError, OSError):
+						# 无法读取的文件继续处理
+						pass
+					filtered_files.append(f)
+				if skipped_count > 0:
+					print(f"转换+重命名阶段跳过了 {skipped_count} 个文件")
+				skipped_for_rename = []
+		else:
+			# 未启用跳过功能时，处理所有文件
+			filtered_files = files
+			skipped_for_rename = []
 		ico_sizes=None
 		if hasattr(self,'ico_keep_orig') and self.ico_keep_orig.get():
 			ico_sizes=None  # Pillow 会用原图尺寸
@@ -1634,7 +1678,7 @@ class ImageToolApp:
 		# 如果目标是 ico 并且存在非方图，预先统计给予提示（仅一次）
 		if fmt=='ico':
 			warn_needed=False
-			for f in files[:50]:  # 采样前50避免过慢
+			for f in filtered_files[:50]:  # 采样前50避免过慢
 				try:
 					with Image.open(f) as im:
 						if im.size[0]!=im.size[1]:
@@ -1649,7 +1693,9 @@ class ImageToolApp:
 		if self.enable_rename.get():
 			from collections import defaultdict
 			dir_map=defaultdict(list)
-			for f in files:
+			# 将需要转换的文件和需要重命名的跳过文件合并
+			all_files_for_rename = filtered_files + skipped_for_rename
+			for f in all_files_for_rename:
 				dir_map[os.path.dirname(f)].append(f)
 			# 每个目录单独起始 start，并递增
 			for d,flist in dir_map.items():
@@ -1657,7 +1703,11 @@ class ImageToolApp:
 				for f in flist:
 					src_ext=norm_ext(f)
 					tgt_fmt=fmt if self.enable_convert.get() else src_ext
-					need_convert=self.enable_convert.get() and (src_ext!=fmt or process_same)
+					
+					# 检查文件是否在跳过转换但需要重命名的列表中
+					is_skipped_for_convert = f in skipped_for_rename
+					need_convert = self.enable_convert.get() and (src_ext!=fmt or process_same) and not is_skipped_for_convert
+					
 					orig_stem=os.path.splitext(os.path.basename(f))[0]
 					default_basename=f"{orig_stem}.{tgt_fmt}"
 					name_raw=pattern
@@ -1707,10 +1757,13 @@ class ImageToolApp:
 					local_idx+=step
 		else:
 			# 不启用重命名则保持原逻辑（全局顺序，但不使用 pattern）
-			for f in files:
+			for f in filtered_files:
 				src_ext=norm_ext(f)
 				tgt_fmt=fmt if self.enable_convert.get() else src_ext
-				need_convert=self.enable_convert.get() and (src_ext!=fmt or process_same)
+				
+				# 检查文件是否在跳过转换但需要重命名的列表中
+				is_skipped_for_convert = f in skipped_for_rename
+				need_convert = self.enable_convert.get() and (src_ext!=fmt or process_same) and not is_skipped_for_convert
 				orig_stem=os.path.splitext(os.path.basename(f))[0]
 				default_basename=f"{orig_stem}.{tgt_fmt}"
 				name=default_basename
@@ -1730,6 +1783,22 @@ class ImageToolApp:
 					convert_path = final_path
 				tasks.append((f,need_convert,tgt_fmt,convert_path,final_path,will_rename,convert_basename,final_basename,idx))
 				idx+=step
+			
+			# 处理跳过转换但需要重命名的文件（仅在"仅格式转换跳过"模式下）
+			if self.skip_convert_only.get():
+				for f in skipped_for_rename:
+					src_ext=norm_ext(f)
+					orig_stem=os.path.splitext(os.path.basename(f))[0]
+					default_basename=f"{orig_stem}.{src_ext}"  # 保持原格式
+					final_basename=default_basename
+					final_path=os.path.join(out_dir,final_basename)
+					if os.path.exists(final_path):
+						if overwrite=='skip':
+							self.q.put(f'LOG\tRENAME\t{f}\t{final_path}\t跳过(存在)'); continue
+						elif overwrite=='rename':
+							final_path=next_non_conflict(final_path) if not self.dry_run else final_path+"(预览改名)"
+					# 跳过转换，直接复制并重命名
+					tasks.append((f,False,src_ext,final_path,final_path,False,final_basename,final_basename,0))
 		total=len(tasks); self.q.put(f'STATUS 转换/重命名 共{total}')
 		done=0; lock=threading.Lock(); final_paths=[]
 		def job(spec):
@@ -2235,11 +2304,40 @@ class ImageToolApp:
 		# 若文件在分类子目录内，保持相对目录
 		class_root=self.cache_dir
 		
+		# 处理跳过逻辑 - 根据"仅格式转换跳过"设置决定是否在重命名阶段应用跳过
+		filtered_files = []
+		if self.skip_formats_enabled.get():
+			if self.skip_convert_only.get():
+				# 单勾选"仅格式转换跳过"时，重命名阶段需要处理所有文件（包括跳过的和转换失败的）
+				filtered_files = files
+			else:
+				# 未勾选"仅格式转换跳过"但启用跳过格式功能时，重命名阶段也要跳过相应格式
+				skip_formats = self._get_skip_formats(for_convert_only=False)
+				skipped_count = 0
+				for f in files:
+					try:
+						with Image.open(f) as img:
+							file_format = img.format
+							if file_format and file_format.upper() in skip_formats:
+								skipped_count += 1
+								# 跳过的文件直接复制保持原名
+								self._copy_file_without_convert(f)
+								continue
+					except (IOError, OSError):
+						# 无法读取的文件（转换失败的）需要重命名
+						pass
+					filtered_files.append(f)
+				if skipped_count > 0:
+					print(f"重命名阶段跳过了 {skipped_count} 个文件")
+		else:
+			# 未启用跳过功能时，处理所有文件
+			filtered_files = files
+		
 		# 按目录分组，每个目录独立编号（如果启用了分类）
 		if self.classify_ratio_var.get():
 			from collections import defaultdict
 			dir_groups = defaultdict(list)
-			for f in files:
+			for f in filtered_files:
 				dir_key = os.path.dirname(f)
 				dir_groups[dir_key].append(f)
 			
@@ -2253,7 +2351,7 @@ class ImageToolApp:
 		else:
 			# 未启用分类时保持原逻辑
 			idx = start
-			for f in files:
+			for f in filtered_files:
 				if self.stop_flag.is_set(): break
 				if not os.path.isfile(f): continue
 				idx = self._process_rename_file(f, pattern, idx, step, pad_width, overwrite, preview, out_dir, class_root)
