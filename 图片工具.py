@@ -1169,7 +1169,7 @@ class ImageToolApp:
 				w, h = image_data['image'].size
 				
 				# 计算相对路径
-				base_root = (self.cache_final_dir or self.cache_dir) if self.dry_run else (self.out_var.get().strip() or self.in_var.get().strip())
+				base_root = (self.cache_final_dir or self.cache_dir) if not getattr(self, 'write_to_output', True) else (self.out_var.get().strip() or self.in_var.get().strip())
 				try:
 					rel = os.path.relpath(image_data['path'], base_root)
 				except Exception:
@@ -1206,7 +1206,7 @@ class ImageToolApp:
 				w, h = image_data['frames'][0].size if image_data['frames'] else (0, 0)
 				
 				# 计算相对路径
-				base_root = (self.cache_final_dir or self.cache_dir) if self.dry_run else (self.out_var.get().strip() or self.in_var.get().strip())
+				base_root = (self.cache_final_dir or self.cache_dir) if not getattr(self, 'write_to_output', True) else (self.out_var.get().strip() or self.in_var.get().strip())
 				try:
 					rel = os.path.relpath(image_data['path'], base_root)
 				except Exception:
@@ -1979,7 +1979,7 @@ class ImageToolApp:
 		workers=max(1,self.workers_var.get())
 		result=[]
 		lock=threading.Lock(); done=0; total=len(file_list)
-		preview=self.dry_run
+		preview=not getattr(self, 'write_to_output', True)
 		self.q.put(f'STATUS 形状分类中 共{total}')
 		
 		# 确保缓存目录已初始化
@@ -2161,8 +2161,8 @@ class ImageToolApp:
 						if 1<=v<=1024: chosen.append(v)
 			if chosen:
 				ico_sizes=sorted(set(chosen))[:10]
-		preview=self.dry_run
-		class_root = (self.cache_dir if preview else real_out)
+		preview=not getattr(self, 'write_to_output', True)
+		class_root = self.cache_dir  # 统一使用缓存目录
 		results=[None]*len(files)
 		lock=threading.Lock(); done=0; total=len(files)
 		def do_one(i,f):
@@ -2224,7 +2224,7 @@ class ImageToolApp:
 		if not pattern: return
 		start=self.start_var.get(); step=self.step_var.get()
 		pad_width=self.index_width_var.get(); overwrite=OVERWRITE_MAP.get(self.overwrite_var.get(),'overwrite')
-		preview=self.dry_run
+		preview=not getattr(self, 'write_to_output', True)
 		real_out=self.out_var.get().strip() or self.in_var.get().strip()
 		# 确保缓存目录已初始化，统一使用缓存目录进行中间处理
 		self._ensure_cache_dir()
@@ -2516,7 +2516,7 @@ class ImageToolApp:
 			return
 		
 		# 源与结果路径推断
-		if self.dry_run:
+		if not getattr(self, 'write_to_output', True):
 			# 缓存中的结果
 			dst_candidates=[os.path.join(self.cache_dir,dst_basename)]
 			if not os.path.splitext(dst_basename)[1]: # 去重组行
@@ -2538,7 +2538,7 @@ class ImageToolApp:
 		result_path=first_exist(dst_candidates)
 		
 		# 预览根基准: 真实执行=输出目录; 预览=cache_final_dir (若存在) 否则 cache_dir
-		base_root = (self.cache_final_dir or self.cache_dir) if self.dry_run else (self.out_var.get().strip() or self.in_var.get().strip())
+		base_root = (self.cache_final_dir or self.cache_dir) if not getattr(self, 'write_to_output', True) else (self.out_var.get().strip() or self.in_var.get().strip())
 		
 		# 使用预览线程处理图片加载
 		self.preview_thread.add_preview_task(src_path, result_path)
@@ -2652,7 +2652,7 @@ class ImageToolApp:
 		
 		try:
 			# 确定失败文件夹路径
-			if self.dry_run:
+			if not getattr(self, 'write_to_output', True):
 				# 预览模式：放到缓存目录下的failed文件夹
 				self._ensure_cache_dir()
 				failed_dir = os.path.join(self.cache_dir, 'failed')
@@ -2673,7 +2673,7 @@ class ImageToolApp:
 					dst_path = os.path.join(failed_dir, f"{base_no}_{i}{ext}")
 					i += 1
 			
-			if self.dry_run:
+			if not getattr(self, 'write_to_output', True):
 				# 预览模式：复制到失败文件夹
 				shutil.copy2(src_path, dst_path)
 				# 同时模拟删除原文件
