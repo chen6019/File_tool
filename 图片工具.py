@@ -2677,7 +2677,13 @@ class ImageToolApp:
 	def _show_tooltip(self,text,x,y):
 		self._hide_tooltip()
 		tw=tk.Toplevel(self.root); tw.wm_overrideredirect(True); tw.attributes('-topmost',True)
-		lab=tk.Label(tw,text=text,background='#FFFFE0',relief='solid',borderwidth=1,justify='left'); lab.pack(ipadx=4,ipady=2)
+		
+		# 设置换行宽度，长文件名时自动换行
+		max_width = 400  # 最大宽度400像素
+		wraplength = max_width if len(text) > 50 else 0  # 超过50字符时启用换行
+		
+		lab=tk.Label(tw,text=text,background='#FFFFE0',relief='solid',borderwidth=1,justify='left',wraplength=wraplength)
+		lab.pack(ipadx=4,ipady=2)
 		tw.wm_geometry(f"+{x+15}+{y+15}"); self._tooltip=tw
 	def _hide_tooltip(self):
 		if self._tooltip:
@@ -2689,6 +2695,7 @@ class ImageToolApp:
 			if self._tooltip_after:
 				try: self.root.after_cancel(self._tooltip_after)
 				except Exception: pass
+			# 使用更新后的_show_tooltip方法，它会自动处理长文本换行
 			self._tooltip_after=self.root.after(450, lambda: self._show_tooltip(text,self.root.winfo_pointerx(),self.root.winfo_pointery()))
 		def leave(_e):
 			if self._tooltip_after:
