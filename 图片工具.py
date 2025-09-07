@@ -100,37 +100,6 @@ def safe_delete(path:str):
 	except Exception as e:
 		return False,f'删失败:{e}'
 
-	def is_animated_image(self, path: str) -> bool:
-		"""检测图片是否为动图 (GIF, WebP, APNG)"""
-		try:
-			with Image.open(path) as im:
-				# 检查是否有多帧
-				if hasattr(im, 'is_animated') and im.is_animated:
-					return True
-				
-				# 对于一些较老版本的PIL，手动检查帧数
-				if im.format in ('GIF', 'WEBP'):
-					try:
-						im.seek(1)  # 尝试移动到第二帧
-						return True
-					except (AttributeError, EOFError):
-						pass
-				
-				# 检查PNG是否为APNG (动态PNG)
-				if im.format == 'PNG':
-					# APNG会有特殊的chunk标识
-					if hasattr(im, 'info') and 'transparency' in im.info:
-						# 简单检查，更完整的检查需要解析PNG chunk
-						try:
-							frames = list(ImageSequence.Iterator(im))
-							return len(frames) > 1
-						except:
-							pass
-			
-			return False
-		except Exception:
-			return False
-
 def ahash(im):
 	im=im.convert('L').resize((8,8))
 	avg=sum(im.getdata())/64.0
@@ -755,6 +724,37 @@ class ImageToolApp:
 			print(f"[CRITICAL ERROR] Pipeline failed: {full_error}")
 		finally:
 			self.dry_run=False
+
+	def is_animated_image(self, path: str) -> bool:
+		"""检测图片是否为动图 (GIF, WebP, APNG)"""
+		try:
+			with Image.open(path) as im:
+				# 检查是否有多帧
+				if hasattr(im, 'is_animated') and im.is_animated:
+					return True
+				
+				# 对于一些较老版本的PIL，手动检查帧数
+				if im.format in ('GIF', 'WEBP'):
+					try:
+						im.seek(1)  # 尝试移动到第二帧
+						return True
+					except (AttributeError, EOFError):
+						pass
+				
+				# 检查PNG是否为APNG (动态PNG)
+				if im.format == 'PNG':
+					# APNG会有特殊的chunk标识
+					if hasattr(im, 'info') and 'transparency' in im.info:
+						# 简单检查，更完整的检查需要解析PNG chunk
+						try:
+							frames = list(ImageSequence.Iterator(im))
+							return len(frames) > 1
+						except:
+							pass
+			
+			return False
+		except Exception:
+			return False
 
 	# 去重
 	def _dedupe_stage(self, files:List[str])->List[str]:
