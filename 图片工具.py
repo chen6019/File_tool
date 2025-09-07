@@ -653,7 +653,7 @@ class ImageToolApp:
 		self.preview_info=self.preview_after_info
 		# 自动调整窗口大小选项
 		self.auto_resize_window=tk.BooleanVar(value=True)
-		cb_auto=ttk.Checkbutton(prev,text='随图自调',variable=self.auto_resize_window)
+		cb_auto=ttk.Checkbutton(prev,text='随图调高',variable=self.auto_resize_window)
 		cb_auto.grid(row=2,column=0,columnspan=2,sticky='w',pady=(2,0))  # 跨越两列以保持对称
 		self._last_auto_size=None
 		self.auto_resize_window.trace_add('write', lambda *a: self._maybe_resize_window())
@@ -710,7 +710,7 @@ class ImageToolApp:
 		tips.extend(more_tips)
 		# 补充自动调整窗口提示
 		if 'cb_auto' in locals():
-			try: tips.append((cb_auto,'根据预览图片尺寸自动调整窗口大小'))
+			try: tips.append((cb_auto,'根据预览图片高度自动调整窗口高度，宽度可手动调整'))
 			except Exception: pass
 		for w,t in tips: self._bind_tip(w,t)
 		self._update_states()
@@ -2402,13 +2402,13 @@ class ImageToolApp:
 		sh=self.root.winfo_screenheight(); margin=50
 		desired_h=min(desired_h, sh-margin)
 		
-		# 确保宽度不会自动调整：使用窗口的当前宽度或最小宽度
-		cur_w=self.root.winfo_width()  # 保持当前宽度
+		# 确保禁用宽度自动调整：始终保持当前宽度
+		cur_w=self.root.winfo_width()  # 获取当前宽度
 		min_w = getattr(self, '_min_window_width', 800)  # 最小宽度800像素
-		final_w = max(cur_w, min_w)  # 确保不会变得太小
+		final_w = max(cur_w, min_w)  # 确保不会变得太小，但不自动增大
 		
 		last=self._last_auto_size
-		# last[0] 存旧宽度, last[1] 旧高度
+		# 只比较高度，宽度保持不变
 		if not (last and abs(last[1]-desired_h)<10):
 			self.root.geometry(f"{int(final_w)}x{int(desired_h)}")
 			self._last_auto_size=(final_w,desired_h)
