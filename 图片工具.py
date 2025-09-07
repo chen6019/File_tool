@@ -1275,7 +1275,6 @@ class ImageToolApp:
 	def _convert_stage_only(self, files:list[str])->list[str]:
 		fmt=FMT_MAP.get(self.fmt_var.get(),'png')
 		process_same=self.process_same_var.get(); quality=self.quality_var.get(); png3=self.png3_var.get()
-		remove_src_on_convert=self.convert_remove_src.get()
 		workers=max(1,self.workers_var.get())
 		real_out=self.out_var.get().strip() or self.in_var.get().strip()
 		# 确保缓存目录已初始化，统一使用缓存目录进行中间处理
@@ -1329,14 +1328,6 @@ class ImageToolApp:
 			except Exception: pass
 			dest=os.path.join(dest_dir,out_name)
 			ok,msg=convert_one(f,dest,tgt_fmt,quality if tgt_fmt in ('jpg','png','webp') else None,png3 if tgt_fmt=='png' else False,ico_sizes if tgt_fmt=='ico' else None,self.ico_square_mode_code() if tgt_fmt=='ico' else None)
-			if ok and remove_src_on_convert and not preview:
-				try: safe_delete(f)
-				except Exception: pass
-			elif not ok and remove_src_on_convert:
-				# 转换失败但需要删源：将失败文件移动到失败文件夹
-				failed_path = self._handle_failed_file(f, msg, True)
-				if failed_path:
-					msg += f" (文件已移至失败文件夹)"
 			with lock:
 				if ok:
 					self.q.put(f'LOG\tCONVERT\t{f}\t{dest}\t转换')
@@ -1430,11 +1421,8 @@ class ImageToolApp:
 				else:
 					dest=dest+'(预览改名)'
 		try:
-			if preview:
-				shutil.copy2(f,dest)
-			else:
-				# 正常模式下在缓存目录中操作，也使用移动避免重复文件
-				shutil.move(f,dest)
+			# 在缓存目录内始终使用复制，保持文件链完整，便于预览查看
+			shutil.copy2(f,dest)
 			self.q.put(f'LOG\tRENAME\t{f}\t{dest}\t重命名')
 		except Exception as e:
 			import traceback
