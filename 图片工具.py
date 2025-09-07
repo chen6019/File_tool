@@ -655,23 +655,85 @@ class ImageToolApp:
 				# 直接清除旧缓存 (取消快速提交逻辑)
 				self._clear_cache()
 		inp=self.in_var.get().strip()
-		if not inp: self.status_var.set('未选择输入'); return
+		if not inp: 
+			self.status_var.set('未选择输入'); return
+		
+		# 检查输入路径是否存在
+		if not os.path.exists(inp):
+			self.status_var.set('输入路径不存在'); return
+		
 		self.single_file_mode=False
 		if os.path.isdir(inp):
+			# 检查输入文件夹权限
+			if not self._check_directory_permissions(inp, 'read'):
+				self.status_var.set('输入文件夹无读取权限'); return
+			
 			root_dir=inp
 			out_dir=self.out_var.get().strip() or root_dir
-			os.makedirs(out_dir,exist_ok=True)
-			self._all_files=[p for p in iter_images(root_dir,self.recursive_var.get())]
+			
+			# 检查输出文件夹权限
+			try:
+				os.makedirs(out_dir,exist_ok=True)
+				if not self._check_directory_permissions(out_dir, 'write'):
+					self.status_var.set('输出文件夹无写入权限'); return
+			except PermissionError:
+				self.status_var.set('输出文件夹创建失败：权限不足'); return
+			except Exception as e:
+				self.status_var.set(f'输出文件夹创建失败：{e}'); return
+			
+			# 统计文件信息
+			all_files, non_image_files = self._scan_directory_files(root_dir, self.recursive_var.get())
+			self._all_files = all_files
+			
+			# 提供文件统计信息
+			if non_image_files:
+				non_image_count = len(non_image_files)
+				image_count = len(all_files)
+				if image_count == 0:
+					# 只有非图片文件
+					sample_files = ', '.join(non_image_files[:3])
+					if non_image_count > 3:
+						sample_files += f' 等{non_image_count}个文件'
+					self.status_var.set(f'文件夹中无图片文件，只有非图片文件：{sample_files}'); return
+				else:
+					# 有图片也有非图片文件
+					sample_files = ', '.join(non_image_files[:2])
+					if non_image_count > 2:
+						sample_files += f' 等{non_image_count}个'
+					print(f"发现 {image_count} 个图片文件，{non_image_count} 个非图片文件({sample_files})将被忽略")
+			elif len(all_files) == 0:
+				self.status_var.set('文件夹为空或无图片文件'); return
 		elif os.path.isfile(inp):
-			# 单文件
+			# 单文件模式
+			if not self._check_file_permissions(inp, 'read'):
+				self.status_var.set('输入文件无读取权限'); return
+			
+			# 检查是否为支持的图片格式
+			if os.path.splitext(inp)[1].lower() not in SUPPORTED_EXT:
+				self.status_var.set('不支持的文件格式'); return
+			
 			root_dir=os.path.dirname(inp) or os.getcwd()
 			out_dir=self.out_var.get().strip() or root_dir
-			os.makedirs(out_dir,exist_ok=True)
+			
+			# 检查输出文件夹权限
+			try:
+				os.makedirs(out_dir,exist_ok=True)
+				if not self._check_directory_permissions(out_dir, 'write'):
+					self.status_var.set('输出文件夹无写入权限'); return
+			except PermissionError:
+				self.status_var.set('输出文件夹创建失败：权限不足'); return
+			except Exception as e:
+				self.status_var.set(f'输出文件夹创建失败：{e}'); return
+			
 			self._all_files=[inp]
 			self.single_file_mode=True
 		else:
-			self.status_var.set('输入不存在'); return
-		if not self._all_files: self.status_var.set('无图片'); return
+			self.status_var.set('输入路径类型不支持'); return
+		
+		# 最终检查
+		if not self._all_files: 
+			self.status_var.set('无有效图片文件'); return
+		
 		for i in self.log.get_children(): self.log.delete(i)
 		self.progress['value']=0; self.progress['maximum']=len(self._all_files)
 		self.status_var.set('开始...' if not dry_run else '预览模式 (不修改文件)')
@@ -930,6 +992,74 @@ class ImageToolApp:
 				return f"{size_bytes / (1024 * 1024):.2f}MB"
 		except Exception:
 			return "未知大小"
+
+	def _check_directory_permissions(self, path, mode='read'):
+		"""检查目录权限"""
+		try:
+			if mode == 'read':
+				# 检查读取权限：尝试列出目录内容
+				os.listdir(path)
+				return True
+			elif mode == 'write':
+				# 检查写入权限：尝试创建临时文件
+				test_file = os.path.join(path, '.temp_permission_test')
+				try:
+					with open(test_file, 'w') as f:
+						f.write('test')
+					os.remove(test_file)
+					return True
+				except Exception:
+					return False
+			return False
+		except PermissionError:
+			return False
+		except Exception:
+			# 其他异常也认为没有权限
+			return False
+
+	def _check_file_permissions(self, path, mode='read'):
+		"""检查文件权限"""
+		try:
+			if mode == 'read':
+				# 检查读取权限：尝试打开文件
+				with open(path, 'rb') as f:
+					f.read(1)
+				return True
+			elif mode == 'write':
+				# 检查写入权限：检查文件是否可写
+				return os.access(path, os.W_OK)
+			return False
+		except PermissionError:
+			return False
+		except Exception:
+			return False
+
+	def _scan_directory_files(self, root_dir, recursive=True):
+		"""扫描目录，返回图片文件列表和非图片文件列表"""
+		image_files = []
+		non_image_files = []
+		
+		try:
+			for dirpath, dirs, files in os.walk(root_dir):
+				for f in files:
+					full_path = os.path.join(dirpath, f)
+					ext = os.path.splitext(f)[1].lower()
+					
+					if ext in SUPPORTED_EXT:
+						image_files.append(full_path)
+					else:
+						# 只记录文件名，不记录完整路径
+						non_image_files.append(f)
+				
+				if not recursive:
+					break
+		except PermissionError:
+			# 如果遇到权限问题，返回已扫描的结果
+			pass
+		except Exception as e:
+			print(f"扫描目录时出错：{e}")
+		
+		return image_files, non_image_files
 
 	# 管线
 	def _copy_files_to_final(self, files):
