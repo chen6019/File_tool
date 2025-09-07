@@ -506,8 +506,7 @@ class ImageToolApp:
 		lbl_shape_tol.grid(row=0,column=0,sticky='e')
 		sp_shape_tol=ttk.Spinbox(shape_frame,from_=0.01,to=0.5,increment=0.01,textvariable=self.shape_tolerance_var,width=8,format='%.2f')
 		sp_shape_tol.grid(row=0,column=1,sticky='w',padx=(4,12))
-		lbl_shape_tol_desc=ttk.Label(shape_frame,text='(方形判定容差，默认0.05=±5%)')
-		lbl_shape_tol_desc.grid(row=0,column=2,sticky='w',columnspan=3)
+		# 容差描述移到了tooltip
 		
 		# 第二行：文件夹名称设置
 		lbl_shape_folder=ttk.Label(shape_frame,text='文件夹')
@@ -547,16 +546,10 @@ class ImageToolApp:
 		self._shape_btn_reset=btn_reset_shape
 		# 保存标签引用
 		self._shape_lbl_tol=lbl_shape_tol
-		self._shape_lbl_tol_desc=lbl_shape_tol_desc
 		self._shape_lbl_folder=lbl_shape_folder
 		self._shape_lbl_square=lbl_square
 		self._shape_lbl_horizontal=lbl_horizontal
 		self._shape_lbl_vertical=lbl_vertical
-		
-		# # 形状分类说明
-		# shape_info_frame = ttk.Frame(shape_frame)
-		# shape_info_frame.grid(row=2,column=0,columnspan=5,sticky='w',pady=(4,8))
-		# ttk.Label(shape_info_frame, text='将图片按形状分类到不同文件夹，支持自定义文件夹名称', foreground='gray').pack(side='left')
 		
 		# 转换 (第二阶段)
 		ttk.Separator(outer,orient='horizontal').pack(fill='x',pady=(0,4))
@@ -742,6 +735,7 @@ class ImageToolApp:
 		tips=[
 			(ent_in,'输入目录/文件 (支持常见图片)'),(btn_in,'选择输入目录'),(btn_in_file,'选择单个图片文件'),(cb_rec,'是否递归子目录 (单文件时忽略)'),
 			(ent_out,'输出目录 (留空=跟随输入目录或文件所在目录)'),(btn_out,'选择输出目录'),(btn_open_out,'打开输出目录'),
+			(cb_classify,'按比例分类：根据自定义比例列表创建子目录，支持容差和吸附设置'),(cb_shape,'按形状分类：将图片按横向(宽>高)、纵向(高>宽)、方形(宽≈高)分类，支持自定义容差和文件夹名称'),
 			(cb_dedupe,'勾选执行重复检测'),(cb_convert,'勾选执行格式转换'),(cb_rename,'勾选执行重命名'),
 			(sp_workers,'并行线程数'),(btn_start,'真实执行'),(btn_preview,'仅预览不写入'),(btn_cancel,'取消执行'),
 			(sp_th,'相似阈值 0：严格 |  >0：近似'),(cb_keep,'重复组保留策略'),(cb_action,'重复文件动作'),
@@ -2813,7 +2807,7 @@ class ImageToolApp:
 						try: widget.configure(state=state)
 						except Exception: pass
 				# 形状分类区域的标签启用/禁用
-				for widget in (getattr(self,'_shape_lbl_tol',None), getattr(self,'_shape_lbl_tol_desc',None), getattr(self,'_shape_lbl_folder',None), getattr(self,'_shape_lbl_square',None), getattr(self,'_shape_lbl_horizontal',None), getattr(self,'_shape_lbl_vertical',None)):
+				for widget in (getattr(self,'_shape_lbl_tol',None), getattr(self,'_shape_lbl_folder',None), getattr(self,'_shape_lbl_square',None), getattr(self,'_shape_lbl_horizontal',None), getattr(self,'_shape_lbl_vertical',None)):
 					if widget:
 						state='normal' if enabled else 'disabled'
 						try: widget.configure(state=state)
