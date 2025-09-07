@@ -64,11 +64,38 @@ STAGE_MAP_DISPLAY={
 def _rev_map(mp:dict):
 	return {v:k for k,v in mp.items()}
 
-def iter_images(root:str, recursive:bool) -> Iterable[str]:
+def iter_images(root:str, recursive:bool, skip_formats:set=None) -> Iterable[str]:
+	"""
+	遍历图片文件，使用实际文件格式检测而非扩展名
+	skip_formats: 要跳过的格式集合，如 {'JPEG', 'PNG'}
+	"""
+	if skip_formats is None:
+		skip_formats = set()
+	
 	for dirpath, dirs, files in os.walk(root):
 		for f in files:
+			filepath = os.path.join(dirpath, f)
+			# 首先检查扩展名是否可能是图片
 			if os.path.splitext(f)[1].lower() in SUPPORTED_EXT:
-				yield os.path.join(dirpath,f)
+				# 使用PIL检测实际文件格式
+				try:
+					with Image.open(filepath) as img:
+						file_format = img.format
+						if file_format and file_format.upper() not in skip_formats:
+							yield filepath
+				except (IOError, OSError):
+					# 文件损坏或不是有效图片，跳过
+					continue
+			# 如果没有图片扩展名，但启用了格式检测，也尝试用PIL打开
+			else:
+				try:
+					with Image.open(filepath) as img:
+						file_format = img.format
+						if file_format and file_format.upper() not in skip_formats:
+							yield filepath
+				except (IOError, OSError):
+					# 不是图片文件，跳过
+					continue
 		if not recursive:
 			break
 
@@ -304,6 +331,16 @@ class ImageToolApp:
 		self.trash_cb=None  # 兼容旧引用
 		self.last_out_dir=None
 		self.cache_dir=None  # 预览缓存文件夹
+		# 跳过格式的变量
+		self.skip_formats_enabled = tk.BooleanVar()  # 是否启用跳过功能
+		self.skip_jpeg = tk.BooleanVar()
+		self.skip_png = tk.BooleanVar()
+		self.skip_webp = tk.BooleanVar()
+		self.skip_gif = tk.BooleanVar()
+		self.skip_bmp = tk.BooleanVar()
+		self.skip_tiff = tk.BooleanVar()
+		self.skip_ico = tk.BooleanVar()
+		self.skip_custom_var = tk.StringVar()  # 自定义跳过格式输入框
 		
 		# 初始化预览线程
 		self.preview_thread = PreviewThread(self)
@@ -335,6 +372,47 @@ class ImageToolApp:
 		self.out_var.trace_add('write', self._on_out_dir_change)
 		btn_out=ttk.Button(io,text='选择',command=self._pick_out,width=6); btn_out.grid(row=0,column=7,padx=(2,0))
 		btn_open_out=ttk.Button(io,text='打开',command=self._open_last_out,width=6); btn_open_out.grid(row=0,column=8,padx=(4,0))
+		
+		# 跳过格式设置 (全局输入过滤)
+		skip_frame=ttk.LabelFrame(outer,text='跳过格式 (全局输入过滤)'); skip_frame.pack(fill='x',pady=(0,6))
+		skip_enable_frame = ttk.Frame(skip_frame)
+		skip_enable_frame.pack(fill='x', pady=(4,2))
+		skip_enable_cb = ttk.Checkbutton(skip_enable_frame, text='启用跳过功能', variable=self.skip_formats_enabled, command=self._toggle_skip_formats)
+		skip_enable_cb.pack(side='left')
+		
+		# 格式选择区域 - 单行布局
+		formats_frame = ttk.Frame(skip_frame)
+		formats_frame.pack(fill='x', pady=(0,2))
+		ttk.Label(formats_frame, text='预设:').pack(side='left')
+		
+		# 预设格式复选框
+		format_options = [
+			('JPEG', self.skip_jpeg),
+			('PNG', self.skip_png),
+			('WebP', self.skip_webp),
+			('GIF', self.skip_gif),
+			('BMP', self.skip_bmp),
+			('TIFF', self.skip_tiff),
+			('ICO', self.skip_ico)
+		]
+		
+		self.skip_format_checkboxes = []
+		for i, (text, var) in enumerate(format_options):
+			cb = ttk.Checkbutton(formats_frame, text=text, variable=var)
+			cb.pack(side='left', padx=(8,6))
+			self.skip_format_checkboxes.append(cb)
+		
+		# 自定义格式输入框
+		custom_frame = ttk.Frame(skip_frame)
+		custom_frame.pack(fill='x', pady=(0,4))
+		ttk.Label(custom_frame, text='自定义:').pack(side='left')
+		self.skip_custom_entry = ttk.Entry(custom_frame, textvariable=self.skip_custom_var, width=20)
+		self.skip_custom_entry.pack(side='left', padx=(4,8))
+		ttk.Label(custom_frame, text='(多个格式用空格或逗号分隔，如: AVIF HEIC)', foreground='gray').pack(side='left')
+		
+		# 初始状态下禁用格式选择
+		self._toggle_skip_formats()
+		
 		# 功能
 		opts=ttk.Frame(outer); opts.pack(fill='x',pady=(0,8))
 		self.enable_dedupe=tk.BooleanVar(value=False)
@@ -451,8 +529,8 @@ class ImageToolApp:
 			cb.grid(row=0,column=i,sticky='w')
 			self.ico_checks.append(cb)
 		cb_keep=ttk.Checkbutton(ico_box,text='不改变',variable=self.ico_keep_orig)
-		cb_keep.grid(row=0,column=6,sticky='w',padx=(6,0))
 		self.ico_keep_cb=cb_keep; self.ico_custom_entry=ent_ico; self.ico_label=lbl_ico
+		
 		# 去重 (第三阶段)
 		ttk.Separator(outer,orient='horizontal').pack(fill='x',pady=(0,4))
 		dedupe=ttk.LabelFrame(outer,text='去重设置'); dedupe.pack(fill='x',pady=(0,10))
@@ -645,6 +723,14 @@ class ImageToolApp:
 	def _pick_move_dir(self):
 		d=filedialog.askdirectory();
 		if d: self.move_dir_var.set(d)
+
+	def _toggle_skip_formats(self):
+		"""切换跳过格式功能的启用状态"""
+		enabled = self.skip_formats_enabled.get()
+		for cb in self.skip_format_checkboxes:
+			cb.config(state='normal' if enabled else 'disabled')
+		if hasattr(self, 'skip_custom_entry'):
+			self.skip_custom_entry.config(state='normal' if enabled else 'disabled')
 
 	def _start(self, dry_run:bool=False):
 		if self.worker and self.worker.is_alive():
@@ -1001,17 +1087,62 @@ class ImageToolApp:
 		image_files = []
 		non_image_files = []
 		
+		# 获取要跳过的格式集合
+		skip_formats = set()
+		if self.skip_formats_enabled.get():
+			format_map = {
+				'skip_jpeg': 'JPEG',
+				'skip_png': 'PNG', 
+				'skip_webp': 'WEBP',
+				'skip_gif': 'GIF',
+				'skip_bmp': 'BMP',
+				'skip_tiff': 'TIFF',
+				'skip_ico': 'ICO'
+			}
+			for attr_name, format_name in format_map.items():
+				if hasattr(self, attr_name) and getattr(self, attr_name).get():
+					skip_formats.add(format_name)
+			
+			# 处理自定义格式
+			custom_formats = self.skip_custom_var.get().strip()
+			if custom_formats:
+				# 支持空格、逗号、分号分隔
+				for fmt in custom_formats.replace(',', ' ').replace(';', ' ').replace('；', ' ').split():
+					if fmt:
+						skip_formats.add(fmt.upper())
+		
 		try:
+			# 使用更新后的 iter_images 函数
+			for img_path in iter_images(root_dir, recursive, skip_formats):
+				image_files.append(img_path)
+			
+			# 单独收集非图片文件用于提示
 			for dirpath, dirs, files in os.walk(root_dir):
 				for f in files:
 					full_path = os.path.join(dirpath, f)
 					ext = os.path.splitext(f)[1].lower()
 					
-					if ext in SUPPORTED_EXT:
-						image_files.append(full_path)
-					else:
-						# 只记录文件名，不记录完整路径
-						non_image_files.append(f)
+					# 检查是否是非图片文件
+					if ext not in SUPPORTED_EXT:
+						# 尝试用PIL打开看是否是图片
+						try:
+							with Image.open(full_path) as img:
+								# 是图片但不在支持扩展名中，已经被iter_images处理了
+								pass
+						except (IOError, OSError):
+							# 确实不是图片文件
+							non_image_files.append(f)
+					elif ext in SUPPORTED_EXT:
+						# 有图片扩展名但被跳过的文件
+						try:
+							with Image.open(full_path) as img:
+								file_format = img.format
+								if file_format and file_format.upper() in skip_formats:
+									# 被跳过的图片文件也记录到非图片列表中进行提示
+									non_image_files.append(f + f" (跳过{file_format}格式)")
+						except (IOError, OSError):
+							# 损坏的图片文件
+							non_image_files.append(f + " (损坏)")
 				
 				if not recursive:
 					break
