@@ -93,10 +93,14 @@ def safe_delete(path:str):
 			try:
 				os.remove(path)
 				return True,f'删除(回收站失败:{e})'
+			except PermissionError as e2:
+				return False,f'删除失败: 权限不足'
 			except Exception as e2:
 				return False,f'删失败:{e2}'
 	try:
 		os.remove(path); return True,'删除'
+	except PermissionError as e:
+		return False,f'删除失败: 权限不足'
 	except Exception as e:
 		return False,f'删失败:{e}'
 
@@ -168,6 +172,8 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 					params['quality']=quality or 80
 				im.save(dst, fmt.upper(), **params)
 		return True,'OK'
+	except PermissionError as e:
+		return False, f"权限不足: {str(e)}"
 	except Exception as e:
 		import traceback
 		# 返回详细的错误信息，包含异常类型和堆栈
@@ -664,26 +670,25 @@ class ImageToolApp:
 		
 		self.single_file_mode=False
 		if os.path.isdir(inp):
-			# 检查输入文件夹权限
-			if not self._check_directory_permissions(inp, 'read'):
-				self.status_var.set('输入文件夹无读取权限'); return
-			
 			root_dir=inp
 			out_dir=self.out_var.get().strip() or root_dir
 			
-			# 检查输出文件夹权限
+			# 尝试创建输出文件夹
 			try:
 				os.makedirs(out_dir,exist_ok=True)
-				if not self._check_directory_permissions(out_dir, 'write'):
-					self.status_var.set('输出文件夹无写入权限'); return
 			except PermissionError:
 				self.status_var.set('输出文件夹创建失败：权限不足'); return
 			except Exception as e:
 				self.status_var.set(f'输出文件夹创建失败：{e}'); return
 			
 			# 统计文件信息
-			all_files, non_image_files = self._scan_directory_files(root_dir, self.recursive_var.get())
-			self._all_files = all_files
+			try:
+				all_files, non_image_files = self._scan_directory_files(root_dir, self.recursive_var.get())
+				self._all_files = all_files
+			except PermissionError:
+				self.status_var.set('输入文件夹无读取权限'); return
+			except Exception as e:
+				self.status_var.set(f'读取输入文件夹失败：{e}'); return
 			
 			# 提供文件统计信息
 			if non_image_files:
@@ -705,9 +710,6 @@ class ImageToolApp:
 				self.status_var.set('文件夹为空或无图片文件'); return
 		elif os.path.isfile(inp):
 			# 单文件模式
-			if not self._check_file_permissions(inp, 'read'):
-				self.status_var.set('输入文件无读取权限'); return
-			
 			# 检查是否为支持的图片格式
 			if os.path.splitext(inp)[1].lower() not in SUPPORTED_EXT:
 				self.status_var.set('不支持的文件格式'); return
@@ -715,11 +717,9 @@ class ImageToolApp:
 			root_dir=os.path.dirname(inp) or os.getcwd()
 			out_dir=self.out_var.get().strip() or root_dir
 			
-			# 检查输出文件夹权限
+			# 尝试创建输出文件夹
 			try:
 				os.makedirs(out_dir,exist_ok=True)
-				if not self._check_directory_permissions(out_dir, 'write'):
-					self.status_var.set('输出文件夹无写入权限'); return
 			except PermissionError:
 				self.status_var.set('输出文件夹创建失败：权限不足'); return
 			except Exception as e:
@@ -993,47 +993,6 @@ class ImageToolApp:
 		except Exception:
 			return "未知大小"
 
-	def _check_directory_permissions(self, path, mode='read'):
-		"""检查目录权限"""
-		try:
-			if mode == 'read':
-				# 检查读取权限：尝试列出目录内容
-				os.listdir(path)
-				return True
-			elif mode == 'write':
-				# 检查写入权限：尝试创建临时文件
-				test_file = os.path.join(path, '.temp_permission_test')
-				try:
-					with open(test_file, 'w') as f:
-						f.write('test')
-					os.remove(test_file)
-					return True
-				except Exception:
-					return False
-			return False
-		except PermissionError:
-			return False
-		except Exception:
-			# 其他异常也认为没有权限
-			return False
-
-	def _check_file_permissions(self, path, mode='read'):
-		"""检查文件权限"""
-		try:
-			if mode == 'read':
-				# 检查读取权限：尝试打开文件
-				with open(path, 'rb') as f:
-					f.read(1)
-				return True
-			elif mode == 'write':
-				# 检查写入权限：检查文件是否可写
-				return os.access(path, os.W_OK)
-			return False
-		except PermissionError:
-			return False
-		except Exception:
-			return False
-
 	def _scan_directory_files(self, root_dir, recursive=True):
 		"""扫描目录，返回图片文件列表和非图片文件列表"""
 		image_files = []
@@ -1180,6 +1139,8 @@ class ImageToolApp:
 					# 记录缓存文件到原始文件的映射
 					self.cache_to_original_map[cache_file_path] = file_path
 					# 不再显示每个文件的复制日志
+				except PermissionError:
+					self.q.put(f'LOG\tCOPY_INPUT\t{relative_path}\t\t复制失败: 权限不足')
 				except Exception as e:
 					self.q.put(f'LOG\tCOPY_INPUT\t{relative_path}\t\t复制失败: {e}')
 			
@@ -1526,6 +1487,8 @@ class ImageToolApp:
 							msg_convert='保持(预览)'
 						else:
 							msg_convert='复制(预览)'
+					except PermissionError:
+						ok_convert=False; msg_convert='复制失败(预览): 权限不足'
 					except Exception as e:
 						import traceback
 						error_detail = f"{str(e)} | {traceback.format_exc().replace(chr(10), ' | ')}"
@@ -1536,6 +1499,8 @@ class ImageToolApp:
 							ok_convert=True; msg_convert='保持'
 						else:
 							shutil.copy2(src,convert_path); ok_convert=True; msg_convert='复制'
+					except PermissionError:
+						ok_convert=False; msg_convert='复制失败: 权限不足'
 					except Exception as e:
 						import traceback
 						error_detail = f"{str(e)} | {traceback.format_exc().replace(chr(10), ' | ')}"
@@ -1552,12 +1517,16 @@ class ImageToolApp:
 								# 在同一目录内重命名，删除原文件
 								os.rename(convert_path, final_path)
 						ok_rename=True; msg_rename='命名(预览)'
+					except PermissionError as e:
+						ok_rename=False; msg_rename=f'命名失败(预览): 权限不足'
 					except Exception as e:
 						ok_rename=False; msg_rename=f'命名失败(预览):{e}'
 				else:
 					try:
 						os.replace(convert_path,final_path)
 						ok_rename=True; msg_rename='命名'
+					except PermissionError as e:
+						ok_rename=False; msg_rename=f'命名失败: 权限不足'
 					except Exception as e:
 						ok_rename=False; msg_rename=f'命名失败:{e}'
 			with lock:
@@ -1974,6 +1943,8 @@ class ImageToolApp:
 						shutil.copy2(src_path, dest_path)
 						file_count += 1
 						self.q.put(f'LOG\tFINALIZE\t{src_path}\t{dest_path}\t复制到输出')
+					except PermissionError:
+						self.q.put(f'LOG\tFINALIZE\t{src_path}\t{dest_path}\t复制失败：权限不足')
 					except Exception as e:
 						self.q.put(f'LOG\tFINALIZE\t{src_path}\t{dest_path}\t复制失败:{e}')
 			
@@ -2030,6 +2001,9 @@ class ImageToolApp:
 					os.remove(source_file)
 					deleted_count += 1
 					self.q.put(f'LOG\tREMOVE_SRC\t{source_file}\t\t删除原始文件')
+				except PermissionError:
+					failed_count += 1
+					self.q.put(f'LOG\tREMOVE_SRC\t{source_file}\t\t删除失败: 权限不足')
 				except Exception as e:
 					failed_count += 1
 					self.q.put(f'LOG\tREMOVE_SRC\t{source_file}\t\t删除失败: {e}')
