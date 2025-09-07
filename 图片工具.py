@@ -100,6 +100,37 @@ def safe_delete(path:str):
 	except Exception as e:
 		return False,f'删失败:{e}'
 
+def is_animated_image(self, path: str) -> bool:
+		"""检测图片是否为动图 (GIF, WebP, APNG)"""
+		try:
+			with Image.open(path) as im:
+				# 检查是否有多帧
+				if hasattr(im, 'is_animated') and im.is_animated:
+					return True
+				
+				# 对于一些较老版本的PIL，手动检查帧数
+				if im.format in ('GIF', 'WEBP'):
+					try:
+						im.seek(1)  # 尝试移动到第二帧
+						return True
+					except (AttributeError, EOFError):
+						pass
+				
+				# 检查PNG是否为APNG (动态PNG)
+				if im.format == 'PNG':
+					# APNG会有特殊的chunk标识
+					if hasattr(im, 'info') and 'transparency' in im.info:
+						# 简单检查，更完整的检查需要解析PNG chunk
+						try:
+							frames = list(ImageSequence.Iterator(im))
+							return len(frames) > 1
+						except:
+							pass
+			
+			return False
+		except Exception:
+			return False
+
 def ahash(im):
 	im=im.convert('L').resize((8,8))
 	avg=sum(im.getdata())/64.0
@@ -233,6 +264,8 @@ class ImageToolApp:
 		self.enable_rename=tk.BooleanVar(value=False)
 		# 比例分类配置 (新独立区域)
 		self.classify_ratio_var=tk.BooleanVar(value=False)
+		# 分类删源选项（默认不删除源文件，安全起见）
+		self.classify_remove_src=tk.BooleanVar(value=False)
 		# 比例分类默认容差 15%
 		self.ratio_tol_var=tk.DoubleVar(value=0.15)
 		# 保留常用预设: 16:9,3:2,4:3,1:1,21:9
@@ -256,6 +289,7 @@ class ImageToolApp:
 		clsf.columnconfigure(5,weight=1)
 		# 分类内部控件（除启用复选框外可整体禁用）
 		self.cb_ratio_inner_snap=ttk.Checkbutton(clsf,text='不匹配吸附最近',variable=self.ratio_snap_var)
+		cb_classify_rm_src=ttk.Checkbutton(clsf,text='删源',variable=self.classify_remove_src)
 		cb_tol_label=ttk.Label(clsf,text='容差')
 		sp_rt=ttk.Spinbox(clsf,from_=0.0,to=0.2,increment=0.005,format='%.3f',width=6,textvariable=self.ratio_tol_var)
 		btn_reset_ratio=ttk.Button(clsf,text='恢复默认',width=10,command=lambda: self.ratio_custom_var.set('16:9,3:2,4:3,1:1,21:9'))
@@ -263,13 +297,15 @@ class ImageToolApp:
 		ent_ratio=ttk.Entry(clsf,textvariable=self.ratio_custom_var,width=58)
 		# 保存引用供后续 tooltip / 状态控制
 		self._ratio_sp_rt=sp_rt; self._ratio_ent=ent_ratio; self._ratio_btn_reset=btn_reset_ratio; self._ratio_snap=self.cb_ratio_inner_snap; self._ratio_lbl_input=lbl_ratio_input; self._ratio_lbl_tol=cb_tol_label
+		self._classify_rm_src=cb_classify_rm_src
 		# 布局
 		cb_tol_label.grid(row=0,column=0,sticky='e')
 		sp_rt.grid(row=0,column=1,sticky='w',padx=(4,12))
 		self.cb_ratio_inner_snap.grid(row=0,column=2,sticky='w')
-		btn_reset_ratio.grid(row=0,column=3,sticky='w',padx=(12,0))
+		cb_classify_rm_src.grid(row=0,column=3,sticky='w',padx=(8,0))
+		btn_reset_ratio.grid(row=0,column=4,sticky='w',padx=(12,0))
 		lbl_ratio_input.grid(row=1,column=0,sticky='e',pady=(4,0))
-		ent_ratio.grid(row=1,column=1,columnspan=4,sticky='we',pady=(4,2))
+		ent_ratio.grid(row=1,column=1,columnspan=5,sticky='we',pady=(4,2))
 		# 预设比例按钮行
 		preset_frame=ttk.Frame(clsf)
 		preset_frame.grid(row=2,column=0,columnspan=5,sticky='w',pady=(2,2))
@@ -661,6 +697,13 @@ class ImageToolApp:
 				pass
 
 	def _on_close(self):
+		# 清理动画定时器
+		for label in [getattr(self, 'preview_before_label', None), getattr(self, 'preview_after_label', None)]:
+			if label and hasattr(label, '_animation_timer'):
+				try:
+					label.after_cancel(label._animation_timer)
+				except Exception:
+					pass
 		self._clear_cache()
 		self.root.destroy()
 
@@ -1060,7 +1103,7 @@ class ImageToolApp:
 
 	def _ratio_classify_stage(self, file_list:list[str])->list[str]:
 		"""严格按自定义比例分类: 仅命中自定义集合(±tol)的进入对应目录, 其余进入 other。
-		预览模式: 复制到缓存分类目录 (不修改源); 实际执行: 移动。
+		预览模式: 复制到缓存分类目录 (不修改源); 实际执行: 根据删源选项决定复制/移动。
 		返回新路径列表 (分类后路径)。"""
 		COMMON=self._parse_custom_ratios()
 		if not COMMON: return file_list
@@ -1074,18 +1117,26 @@ class ImageToolApp:
 			if self.stop_flag.is_set(): return None
 			if not os.path.isfile(p):
 				with lock: done+=1; return p
-			try:
-				with Image.open(p) as im:
-					w,h=im.size
-			except Exception:
-				with lock: done+=1; return p
-			if h==0:
-				with lock: done+=1; return p
-			ratio=w/h; label='other'
-			for rw,rh,lab in COMMON:
-				ideal=rw/rh
-				if ideal!=0 and abs(ratio-ideal)/ideal <= tol:
-					label=lab; break
+			
+			# 优先检查是否为动图
+			is_animated = self.is_animated_image(p)
+			if is_animated:
+				label = 'animated'
+			else:
+				# 按比例分类静态图片
+				try:
+					with Image.open(p) as im:
+						w,h=im.size
+				except Exception:
+					with lock: done+=1; return p
+				if h==0:
+					with lock: done+=1; return p
+				ratio=w/h; label='other'
+				for rw,rh,lab in COMMON:
+					ideal=rw/rh
+					if ideal!=0 and abs(ratio-ideal)/ideal <= tol:
+						label=lab; break
+			
 			dir_ratio=os.path.join(base_out,label)
 			if not os.path.isdir(dir_ratio):
 				try: os.makedirs(dir_ratio,exist_ok=True)
@@ -1108,7 +1159,11 @@ class ImageToolApp:
 				if preview:
 					shutil.copy2(p,dest)
 				else:
-					shutil.move(p,dest)
+					# 根据删源设置决定复制还是移动
+					if self.classify_remove_src.get():
+						shutil.move(p,dest)
+					else:
+						shutil.copy2(p,dest)
 				self.q.put(f'LOG\tCLASSIFY\t{p}\t{dest}\t比例分类->{label}')
 				res_path=dest
 			except Exception as e:
@@ -1441,14 +1496,55 @@ class ImageToolApp:
 			# 清除文本模式标记
 			if hasattr(label, '_text_mode'):
 				label._text_mode = False
+			# 停止现有动画
+			if hasattr(label, '_animation_timer'):
+				label.after_cancel(label._animation_timer)
+				delattr(label, '_animation_timer')
 			if not path:
 				label.configure(text=placeholder,image=''); info_var.set(''); return (0,0)
 			try:
+				# 检查是否为动图
+				is_animated = self.is_animated_image(path)
+				
 				with Image.open(path) as im:  # type: ignore
 					w,h=im.size; max_side=420; scale=min(max_side/w,max_side/h,1)
-					if scale<1: im=im.resize((int(w*scale),int(h*scale)))
-					photo=ImageTk.PhotoImage(im)
-				label.configure(image=photo,text=''); label._img_ref=photo  # 保持引用
+					
+					if is_animated:
+						# 处理动图
+						frames = []
+						try:
+							for frame in ImageSequence.Iterator(im):
+								frame = frame.copy()
+								if scale<1: 
+									frame = frame.resize((int(w*scale),int(h*scale)), Image.Resampling.LANCZOS)
+								frames.append(ImageTk.PhotoImage(frame))
+						except Exception:
+							# 如果动画加载失败，显示第一帧
+							if scale<1: im=im.resize((int(w*scale),int(h*scale)))
+							frames = [ImageTk.PhotoImage(im)]
+						
+						# 设置动画
+						label._frames = frames
+						label._frame_index = 0
+						label._img_ref = frames[0] if frames else None
+						
+						def animate():
+							if hasattr(label, '_frames') and label._frames:
+								label._frame_index = (label._frame_index + 1) % len(label._frames)
+								label.configure(image=label._frames[label._frame_index])
+								label._animation_timer = label.after(200, animate)  # 200ms间隔
+						
+						if len(frames) > 1:
+							label.configure(image=frames[0], text='')
+							label._animation_timer = label.after(200, animate)
+						else:
+							label.configure(image=frames[0] if frames else '', text='')
+					else:
+						# 处理静态图片
+						if scale<1: im=im.resize((int(w*scale),int(h*scale)))
+						photo=ImageTk.PhotoImage(im)
+						label.configure(image=photo,text='')
+						label._img_ref=photo  # 保持引用
 				try:
 					sz=os.path.getsize(path)
 				except Exception:
@@ -1460,7 +1556,14 @@ class ImageToolApp:
 				except Exception:
 					rel=os.path.basename(path)
 				info_var.set(f'{w}x{h} {size_txt} {rel}')
-				return photo.width(), photo.height()
+				
+				# 返回显示尺寸
+				if is_animated and hasattr(label, '_frames') and label._frames:
+					return label._frames[0].width(), label._frames[0].height()
+				elif hasattr(label, '_img_ref') and label._img_ref:
+					return label._img_ref.width(), label._img_ref.height()
+				else:
+					return (int(w*scale), int(h*scale))
 			except Exception as e:
 				label.configure(text=f'预览失败:{e}',image=''); info_var.set(''); return (0,0)
 		# 预览根基准: 真实执行=输出目录; 预览=cache_final_dir (若存在) 否则 cache_dir
@@ -1699,7 +1802,7 @@ class ImageToolApp:
 			if hasattr(self,'frame_ratio') and self.frame_ratio:
 				enabled=self.classify_ratio_var.get()
 				# 基础控件
-				for widget in (getattr(self,'_ratio_sp_rt',None), getattr(self,'_ratio_ent',None), getattr(self,'_ratio_btn_reset',None), getattr(self,'_ratio_snap',None), getattr(self,'_ratio_lbl_input',None), getattr(self,'_ratio_lbl_tol',None)):
+				for widget in (getattr(self,'_ratio_sp_rt',None), getattr(self,'_ratio_ent',None), getattr(self,'_ratio_btn_reset',None), getattr(self,'_ratio_snap',None), getattr(self,'_ratio_lbl_input',None), getattr(self,'_ratio_lbl_tol',None), getattr(self,'_classify_rm_src',None)):
 					if widget:
 						state='normal' if enabled else 'disabled'
 						try: widget.configure(state=state)
