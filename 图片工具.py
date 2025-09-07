@@ -375,7 +375,7 @@ class ImageToolApp:
 		btn_open_out=ttk.Button(io,text='打开',command=self._open_last_out,width=6); btn_open_out.grid(row=0,column=8,padx=(4,0))
 		
 		# 跳过格式设置 (全局输入过滤)
-		skip_frame=ttk.LabelFrame(outer,text='跳过格式'); skip_frame.pack(fill='x',pady=(0,6))
+		skip_frame=ttk.LabelFrame(outer,text='跳过(过滤)格式'); skip_frame.pack(fill='x',pady=(0,6))
 		skip_enable_frame = ttk.Frame(skip_frame)
 		skip_enable_frame.pack(fill='x', pady=(4,2))
 		skip_enable_cb = ttk.Checkbutton(skip_enable_frame, text='启用跳过功能', variable=self.skip_formats_enabled, command=self._toggle_skip_formats)
