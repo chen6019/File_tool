@@ -185,6 +185,103 @@ class ImgInfo:
 	@property
 	def res(self): return self.w*self.h
 
+class PreviewThread(threading.Thread):
+	"""独立的预览处理线程"""
+	def __init__(self, app):
+		super().__init__(daemon=True)
+		self.app = app
+		self.preview_queue = queue.Queue()
+		self.stop_flag = threading.Event()
+		
+	def run(self):
+		"""预览线程主循环"""
+		while not self.stop_flag.is_set():
+			try:
+				task = self.preview_queue.get(timeout=1.0)
+				if task is None:  # 停止信号
+					break
+				self._process_preview_task(task)
+			except queue.Empty:
+				continue
+			except Exception as e:
+				print(f"Preview thread error: {e}")
+	
+	def add_preview_task(self, src_path, result_path=None):
+		"""添加预览任务"""
+		if not self.stop_flag.is_set():
+			self.preview_queue.put((src_path, result_path))
+	
+	def _process_preview_task(self, task):
+		"""处理单个预览任务"""
+		src_path, result_path = task
+		try:
+			# 在后台线程中准备图片数据
+			src_data = self._prepare_image_data(src_path) if src_path else None
+			result_data = self._prepare_image_data(result_path) if result_path else None
+			
+			# 通过队列发送到主线程更新UI
+			self.app.root.after_idle(lambda: self.app._update_preview_ui(src_data, result_data))
+		except Exception as e:
+			print(f"Preview processing error: {e}")
+			self.app.root.after_idle(lambda: self.app._show_preview_error(str(src_path), str(e)))
+	
+	def _prepare_image_data(self, path):
+		"""在后台线程中准备图片数据"""
+		if not path or not os.path.exists(path):
+			return None
+		
+		try:
+			is_animated = self.app.is_animated_image(path)
+			
+			with Image.open(path) as im:
+				w, h = im.size
+				max_side = 320
+				scale = min(max_side/w, max_side/h, 1)
+				
+				if is_animated:
+					# 处理动图
+					frames = []
+					try:
+						for frame in ImageSequence.Iterator(im):
+							frame = frame.copy()
+							if scale < 1:
+								frame = frame.resize((int(w*scale), int(h*scale)), Image.Resampling.LANCZOS)
+							frames.append(frame)
+					except Exception:
+						# 如果动画加载失败，显示第一帧
+						if scale < 1:
+							im = im.resize((int(w*scale), int(h*scale)))
+						frames = [im.copy()]
+					
+					return {
+						'type': 'animated',
+						'frames': frames,
+						'path': path,
+						'size': os.path.getsize(path)
+					}
+				else:
+					# 处理静态图片
+					if scale < 1:
+						im = im.resize((int(w*scale), int(h*scale)))
+					
+					return {
+						'type': 'static',
+						'image': im.copy(),
+						'path': path,
+						'size': os.path.getsize(path)
+					}
+		except Exception as e:
+			return {
+				'type': 'error',
+				'path': path,
+				'error': str(e)
+			}
+	
+	def stop(self):
+		"""停止预览线程"""
+		self.stop_flag.set()
+		self.preview_queue.put(None)  # 发送停止信号
+
 class ImageToolApp:
 	def __init__(self, root):
 		self.root=root; root.title('图片工具')
@@ -201,6 +298,10 @@ class ImageToolApp:
 		self.trash_cb=None  # 兼容旧引用
 		self.last_out_dir=None
 		self.cache_dir=None  # 预览缓存文件夹
+		
+		# 初始化预览线程
+		self.preview_thread = PreviewThread(self)
+		self.preview_thread.start()
 		self._build()
 		self.root.after(200,self._drain)
 		# 退出时清理缓存
@@ -684,6 +785,10 @@ class ImageToolApp:
 				pass
 
 	def _on_close(self):
+		# 停止预览线程
+		if hasattr(self, 'preview_thread') and self.preview_thread:
+			self.preview_thread.stop()
+		
 		# 清理动画定时器
 		for label in [getattr(self, 'preview_before_label', None), getattr(self, 'preview_after_label', None)]:
 			if label and hasattr(label, '_animation_timer'):
@@ -699,6 +804,132 @@ class ImageToolApp:
 			messagebox.showinfo('提示','任务运行中'); return
 		self._start(dry_run=True)
 		self.status_var.set('预览模式 (不修改文件)')
+
+	def _update_preview_ui(self, src_data, result_data):
+		"""在主线程中更新预览UI"""
+		try:
+			# 清理之前的动画和引用
+			for label in [self.preview_before_label, self.preview_after_label]:
+				if hasattr(label, '_animation_timer'):
+					try:
+						label.after_cancel(label._animation_timer)
+						delattr(label, '_animation_timer')
+					except Exception:
+						pass
+			
+			# 处理源图片
+			if src_data:
+				self._apply_image_to_label(self.preview_before_label, self.preview_before_info, src_data)
+			else:
+				self.preview_before_label.configure(text='(无源)', image='')
+				self.preview_before_label._img_ref = None
+				self.preview_before_info.set('')
+			
+			# 处理结果图片
+			if result_data:
+				self._apply_image_to_label(self.preview_after_label, self.preview_after_info, result_data)
+			else:
+				self.preview_after_label.configure(text='(无结果)', image='')
+				self.preview_after_label._img_ref = None
+				self.preview_after_info.set('')
+			
+			self._maybe_resize_window()
+		except Exception as e:
+			print(f"Preview UI update error: {e}")
+
+	def _apply_image_to_label(self, label, info_var, image_data):
+		"""将图片数据应用到标签"""
+		try:
+			# 清除文本模式标记
+			if hasattr(label, '_text_mode'):
+				label._text_mode = False
+			# 停止现有动画
+			if hasattr(label, '_animation_timer'):
+				label.after_cancel(label._animation_timer)
+				delattr(label, '_animation_timer')
+			# 清除图片引用
+			label._img_ref = None
+			
+			if image_data['type'] == 'static':
+				# 静态图片
+				photo = ImageTk.PhotoImage(image_data['image'])
+				label.configure(image=photo, text='')
+				label._img_ref = photo
+				
+				# 设置信息
+				size_mb = image_data['size'] / (1024 * 1024)
+				w, h = image_data['image'].size
+				
+				# 计算相对路径
+				base_root = (self.cache_final_dir or self.cache_dir) if self.dry_run else (self.out_var.get().strip() or self.in_var.get().strip())
+				try:
+					rel = os.path.relpath(image_data['path'], base_root)
+				except Exception:
+					rel = os.path.basename(image_data['path'])
+				
+				size_txt = self._format_size(image_data['size'])
+				info_var.set(f'{w}x{h} {size_txt} {rel}')
+				
+			elif image_data['type'] == 'animated':
+				# 动态图片
+				frames = []
+				for frame in image_data['frames']:
+					frames.append(ImageTk.PhotoImage(frame))
+				
+				# 设置动画
+				label._frames = frames
+				label._frame_index = 0
+				label._img_ref = frames[0] if frames else None
+				
+				def animate():
+					if hasattr(label, '_frames') and label._frames:
+						label._frame_index = (label._frame_index + 1) % len(label._frames)
+						label.configure(image=label._frames[label._frame_index])
+						label._animation_timer = label.after(50, animate)  # 50ms间隔，约20fps
+				
+				if len(frames) > 1:
+					label.configure(image=frames[0], text='')
+					label._animation_timer = label.after(50, animate)
+				else:
+					label.configure(image=frames[0] if frames else '', text='')
+				
+				# 设置信息
+				size_mb = image_data['size'] / (1024 * 1024)
+				w, h = image_data['frames'][0].size if image_data['frames'] else (0, 0)
+				
+				# 计算相对路径
+				base_root = (self.cache_final_dir or self.cache_dir) if self.dry_run else (self.out_var.get().strip() or self.in_var.get().strip())
+				try:
+					rel = os.path.relpath(image_data['path'], base_root)
+				except Exception:
+					rel = os.path.basename(image_data['path'])
+				
+				size_txt = self._format_size(image_data['size'])
+				info_var.set(f'{w}x{h} {size_txt} {rel} (动图 {len(frames)} 帧)')
+				
+			elif image_data['type'] == 'error':
+				# 错误情况
+				label.configure(text=f'加载失败: {image_data["error"]}', image='')
+				label._img_ref = None
+				info_var.set('加载失败')
+				
+		except Exception as e:
+			print(f"Apply image error: {e}")
+			label.configure(text=f'显示失败: {e}', image='')
+			label._img_ref = None
+			info_var.set('显示失败')
+
+	def _format_size(self, size_bytes):
+		"""格式化文件大小"""
+		try:
+			if size_bytes < 1024:
+				return f"{size_bytes}B"
+			elif size_bytes < 1024 * 1024:
+				return f"{size_bytes / 1024:.1f}KB"
+			else:
+				return f"{size_bytes / (1024 * 1024):.2f}MB"
+		except Exception:
+			return "未知大小"
 
 	# 管线
 	def _copy_files_to_final(self, files):
@@ -1732,86 +1963,12 @@ class ImageToolApp:
 			return None
 		src_path=first_exist(src_candidates)
 		result_path=first_exist(dst_candidates)
-		# 加载函数
-		def load_to(label,info_var,path,placeholder,base_root):
-			# 清除文本模式标记
-			if hasattr(label, '_text_mode'):
-				label._text_mode = False
-			# 停止现有动画
-			if hasattr(label, '_animation_timer'):
-				label.after_cancel(label._animation_timer)
-				delattr(label, '_animation_timer')
-			if not path:
-				label.configure(text=placeholder,image=''); info_var.set(''); return (0,0)
-			try:
-				# 检查是否为动图
-				is_animated = self.is_animated_image(path)
-				
-				with Image.open(path) as im:  # type: ignore
-					w,h=im.size; max_side=420; scale=min(max_side/w,max_side/h,1)
-					
-					if is_animated:
-						# 处理动图
-						frames = []
-						try:
-							for frame in ImageSequence.Iterator(im):
-								frame = frame.copy()
-								if scale<1: 
-									frame = frame.resize((int(w*scale),int(h*scale)), Image.Resampling.LANCZOS)
-								frames.append(ImageTk.PhotoImage(frame))
-						except Exception:
-							# 如果动画加载失败，显示第一帧
-							if scale<1: im=im.resize((int(w*scale),int(h*scale)))
-							frames = [ImageTk.PhotoImage(im)]
-						
-						# 设置动画
-						label._frames = frames
-						label._frame_index = 0
-						label._img_ref = frames[0] if frames else None
-						
-						def animate():
-							if hasattr(label, '_frames') and label._frames:
-								label._frame_index = (label._frame_index + 1) % len(label._frames)
-								label.configure(image=label._frames[label._frame_index])
-								label._animation_timer = label.after(200, animate)  # 200ms间隔
-						
-						if len(frames) > 1:
-							label.configure(image=frames[0], text='')
-							label._animation_timer = label.after(200, animate)
-						else:
-							label.configure(image=frames[0] if frames else '', text='')
-					else:
-						# 处理静态图片
-						if scale<1: im=im.resize((int(w*scale),int(h*scale)))
-						photo=ImageTk.PhotoImage(im)
-						label.configure(image=photo,text='')
-						label._img_ref=photo  # 保持引用
-				try:
-					sz=os.path.getsize(path)
-				except Exception:
-					sz=0
-				size_txt=_fmt_size(sz)
-				# 相对路径 (相对于真实输出目录或预览 final)
-				try:
-					rel=os.path.relpath(path, base_root)
-				except Exception:
-					rel=os.path.basename(path)
-				info_var.set(f'{w}x{h} {size_txt} {rel}')
-				
-				# 返回显示尺寸
-				if is_animated and hasattr(label, '_frames') and label._frames:
-					return label._frames[0].width(), label._frames[0].height()
-				elif hasattr(label, '_img_ref') and label._img_ref:
-					return label._img_ref.width(), label._img_ref.height()
-				else:
-					return (int(w*scale), int(h*scale))
-			except Exception as e:
-				label.configure(text=f'预览失败:{e}',image=''); info_var.set(''); return (0,0)
+		
 		# 预览根基准: 真实执行=输出目录; 预览=cache_final_dir (若存在) 否则 cache_dir
 		base_root = (self.cache_final_dir or self.cache_dir) if self.dry_run else (self.out_var.get().strip() or self.in_var.get().strip())
-		bw,bh=load_to(self.preview_before_label,self.preview_before_info,src_path,'(无源)',base_root)
-		aw,ah=load_to(self.preview_after_label,self.preview_after_info,result_path,'(无结果)',base_root)
-		self._maybe_resize_window()
+		
+		# 使用预览线程处理图片加载
+		self.preview_thread.add_preview_task(src_path, result_path)
 
 	def _maybe_resize_window(self):
 		if not getattr(self,'auto_resize_window',None): return
