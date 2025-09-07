@@ -1490,7 +1490,7 @@ class ImageToolApp:
 					except Exception as e:
 						self.q.put(f'LOG\tFINALIZE\t{src_path}\t{dest_path}\t复制失败:{e}')
 			
-			self.q.put(f'LOG\tFINALIZE\t\t\t完成，共复制 {file_count} 个文件到 {real_out}')
+			# 内部状态信息，不显示在日志框中
 			
 			# 最后一步：如果启用删源功能，删除输入文件夹中的原始文件
 			if self.global_remove_src.get():
@@ -1506,18 +1506,31 @@ class ImageToolApp:
 		try:
 			input_dir = self.in_var.get().strip()
 			if not input_dir or not os.path.exists(input_dir):
+				self.q.put(f'LOG\tREMOVE_SRC\t\t\t输入目录无效或不存在')
 				return
 			
-			# 删除记录中的已处理文件
+			# 获取所有原始文件路径（从映射表中）
+			original_files = set(self.cache_to_original_map.values())
+			
+			# 删除原始文件
 			deleted_count = 0
 			failed_count = 0
 			
-			for source_file in self.processed_source_files:
+			for source_file in original_files:
 				if self.stop_flag.is_set():
 					break
 					
 				if not os.path.exists(source_file):
 					continue  # 文件可能已经被删除
+				
+				# 确保要删除的文件确实在输入目录中
+				try:
+					# 检查文件是否在输入目录下
+					rel_path = os.path.relpath(source_file, input_dir)
+					if rel_path.startswith('..'):
+						continue  # 文件不在输入目录下，跳过
+				except ValueError:
+					continue  # 路径无法计算相对路径，跳过
 				
 				try:
 					os.remove(source_file)
@@ -1527,7 +1540,10 @@ class ImageToolApp:
 					failed_count += 1
 					self.q.put(f'LOG\tREMOVE_SRC\t{source_file}\t\t删除失败: {e}')
 			
-			self.q.put(f'LOG\tREMOVE_SRC\t\t\t完成，删除 {deleted_count} 个文件，失败 {failed_count} 个')
+			if deleted_count > 0 or failed_count > 0:
+				self.q.put(f'LOG\tREMOVE_SRC\t\t\t完成，删除 {deleted_count} 个文件，失败 {failed_count} 个')
+			else:
+				self.q.put(f'LOG\tREMOVE_SRC\t\t\t无文件需要删除')
 			
 		except Exception as e:
 			import traceback
