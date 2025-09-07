@@ -695,7 +695,7 @@ class ImageToolApp:
 			# 清空原始文件映射
 			self.cache_to_original_map = {}
 			
-			self.q.put('STATUS 正在复制输入文件到缓存...')
+			# 不显示复制过程的详细日志
 			
 			for i, file_path in enumerate(files):
 				if self.stop_flag.is_set():
@@ -721,11 +721,13 @@ class ImageToolApp:
 					copied_files.append(cache_file_path)
 					# 记录缓存文件到原始文件的映射
 					self.cache_to_original_map[cache_file_path] = file_path
-					self.q.put(f'LOG\tCOPY_INPUT\t{relative_path}\t\t复制到缓存')
+					# 不再显示每个文件的复制日志
 				except Exception as e:
 					self.q.put(f'LOG\tCOPY_INPUT\t{relative_path}\t\t复制失败: {e}')
 			
-			self.q.put(f'STATUS 已复制 {len(copied_files)} 个文件到缓存')
+			# 只显示总结信息
+			if copied_files:
+				self.q.put(f'STATUS 已准备 {len(copied_files)} 个文件进行处理')
 			return copied_files
 			
 		except Exception as e:
