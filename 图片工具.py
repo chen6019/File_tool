@@ -1187,7 +1187,8 @@ class ImageToolApp:
 		preview=self.dry_run
 		# 确保缓存目录已初始化，统一使用缓存目录进行中间处理
 		self._ensure_cache_dir()
-		base_out=self.cache_dir
+		# 根据模式选择输出目录：预览模式用缓存目录，正常模式用final目录
+		base_out = self.cache_dir if preview else self.cache_final_dir
 		workers=max(1,self.workers_var.get())
 		result=[]; lock=threading.Lock(); done=0; total=len(file_list)
 		def classify_one(p:str):
