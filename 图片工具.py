@@ -207,6 +207,8 @@ class ImageToolApp:
 		self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 		self.cache_trash_dir=None  # 预览模拟回收站目录
 		self.cache_final_dir=None  # 预览最终结果目录 (_final)
+		self.processed_source_files = set()  # 记录已成功处理的源文件路径
+		self.cache_to_original_map = {}  # 缓存文件到原始文件的映射
 		self._last_preview_signature=None
 		self._last_preview_files=None  # list of (path,mtime,size)
 
@@ -233,8 +235,6 @@ class ImageToolApp:
 		self.enable_rename=tk.BooleanVar(value=False)
 		# 比例分类配置 (新独立区域)
 		self.classify_ratio_var=tk.BooleanVar(value=False)
-		# 分类删源选项（默认不删除源文件，安全起见）
-		self.classify_remove_src=tk.BooleanVar(value=False)
 		# 比例分类默认容差 15%
 		self.ratio_tol_var=tk.DoubleVar(value=0.15)
 		# 保留常用预设: 16:9,3:2,4:3,1:1,21:9
@@ -248,6 +248,9 @@ class ImageToolApp:
 		# 默认线程数 16
 		self.workers_var=tk.IntVar(value=16)
 		sp_workers=ttk.Spinbox(opts,from_=1,to=64,textvariable=self.workers_var,width=5); sp_workers.pack(side='left')
+		# 统一的删源选项
+		self.global_remove_src=tk.BooleanVar(value=False)
+		cb_global_rm_src=ttk.Checkbutton(opts,text='删源',variable=self.global_remove_src); cb_global_rm_src.pack(side='left',padx=(8,0))
 		btn_start=ttk.Button(opts,text='开始',command=self._start,width=8); btn_start.pack(side='right',padx=2)
 		btn_preview=ttk.Button(opts,text='预览',command=self._preview,width=8); btn_preview.pack(side='right',padx=2)
 		btn_cancel=ttk.Button(opts,text='取消',command=self._cancel,width=8); btn_cancel.pack(side='right',padx=2)
@@ -258,7 +261,6 @@ class ImageToolApp:
 		clsf.columnconfigure(5,weight=1)
 		# 分类内部控件（除启用复选框外可整体禁用）
 		self.cb_ratio_inner_snap=ttk.Checkbutton(clsf,text='不匹配吸附最近',variable=self.ratio_snap_var)
-		cb_classify_rm_src=ttk.Checkbutton(clsf,text='删源',variable=self.classify_remove_src)
 		cb_tol_label=ttk.Label(clsf,text='容差')
 		sp_rt=ttk.Spinbox(clsf,from_=0.0,to=0.2,increment=0.005,format='%.3f',width=6,textvariable=self.ratio_tol_var)
 		btn_reset_ratio=ttk.Button(clsf,text='恢复默认',width=10,command=lambda: self.ratio_custom_var.set('16:9,3:2,4:3,1:1,21:9'))
@@ -266,15 +268,13 @@ class ImageToolApp:
 		ent_ratio=ttk.Entry(clsf,textvariable=self.ratio_custom_var,width=58)
 		# 保存引用供后续 tooltip / 状态控制
 		self._ratio_sp_rt=sp_rt; self._ratio_ent=ent_ratio; self._ratio_btn_reset=btn_reset_ratio; self._ratio_snap=self.cb_ratio_inner_snap; self._ratio_lbl_input=lbl_ratio_input; self._ratio_lbl_tol=cb_tol_label
-		self._classify_rm_src=cb_classify_rm_src
 		# 布局
 		cb_tol_label.grid(row=0,column=0,sticky='e')
 		sp_rt.grid(row=0,column=1,sticky='w',padx=(4,12))
 		self.cb_ratio_inner_snap.grid(row=0,column=2,sticky='w')
-		cb_classify_rm_src.grid(row=0,column=3,sticky='w',padx=(8,0))
-		btn_reset_ratio.grid(row=0,column=4,sticky='w',padx=(12,0))
+		btn_reset_ratio.grid(row=0,column=3,sticky='w',padx=(12,0))
 		lbl_ratio_input.grid(row=1,column=0,sticky='e',pady=(4,0))
-		ent_ratio.grid(row=1,column=1,columnspan=5,sticky='we',pady=(4,2))
+		ent_ratio.grid(row=1,column=1,columnspan=4,sticky='we',pady=(4,2))
 		# 预设比例按钮行
 		preset_frame=ttk.Frame(clsf)
 		preset_frame.grid(row=2,column=0,columnspan=5,sticky='w',pady=(2,2))
@@ -307,7 +307,6 @@ class ImageToolApp:
 		self.process_same_var=tk.BooleanVar(value=False)
 		self.png3_var=tk.BooleanVar(value=False)
 		# 默认转换后删源
-		self.convert_remove_src=tk.BooleanVar(value=True)
 		self.ico_sizes_var=tk.StringVar(value='')  # 自定义尺寸输入
 		self.ico_keep_orig=tk.BooleanVar(value=False)
 		self.ico_size_vars={s:tk.BooleanVar(value=(s in (16,32,48,64))) for s in (16,32,48,64,128,256)}
@@ -319,7 +318,6 @@ class ImageToolApp:
 		sp_q=ttk.Spinbox(convert,from_=1,to=100,textvariable=self.quality_var,width=5); sp_q.grid(row=0,column=4,sticky='w',padx=(0,8))
 		cb_same=ttk.Checkbutton(convert,text='同格式也重存',variable=self.process_same_var); cb_same.grid(row=0,column=5,sticky='w')
 		cb_png3=ttk.Checkbutton(convert,text='PNG3压缩',variable=self.png3_var); cb_png3.grid(row=0,column=6,sticky='w')
-		cb_rm_src_convert=ttk.Checkbutton(convert,text='删源',variable=self.convert_remove_src); cb_rm_src_convert.grid(row=0,column=7,sticky='w',padx=(8,0))
 		# ICO 尺寸输入 (仅当选择 ico 有效)
 		lbl_ico=ttk.Label(convert,text='ICO尺寸')
 		ent_ico=ttk.Entry(convert,textvariable=self.ico_sizes_var,width=22)
@@ -382,8 +380,6 @@ class ImageToolApp:
 		# 默认序号宽度 3
 		self.index_width_var=tk.IntVar(value=3)  # 0=不补零
 		self.overwrite_var=tk.StringVar(value=_rev_map(OVERWRITE_MAP)['overwrite'])
-		# 重命名默认删源(移动方式)
-		self.rename_remove_src=tk.BooleanVar(value=True)
 		ttk.Label(rename,text='模式').grid(row=0,column=0,sticky='e')
 		ent_pattern=ttk.Entry(rename,textvariable=self.pattern_var,width=42); ent_pattern.grid(row=0,column=1,sticky='w',padx=(0,8))
 		ttk.Label(rename,text='起始').grid(row=0,column=2,sticky='e')
@@ -394,9 +390,7 @@ class ImageToolApp:
 		sp_indexw=ttk.Spinbox(rename,from_=0,to=10,textvariable=self.index_width_var,width=5); sp_indexw.grid(row=0,column=7,sticky='w')
 		ttk.Label(rename,text='覆盖策略').grid(row=0,column=8,sticky='e')
 		cb_over=ttk.Combobox(rename,textvariable=self.overwrite_var,values=list(OVERWRITE_MAP.keys()),width=12,state='readonly'); cb_over.grid(row=0,column=9,sticky='w')
-		cb_rm_src=ttk.Checkbutton(rename,text='删源',variable=self.rename_remove_src)
-		cb_rm_src.grid(row=0,column=10,sticky='w',padx=(8,0))
-		for i in range(11): rename.columnconfigure(i,weight=0)
+		for i in range(10): rename.columnconfigure(i,weight=0)
 		# 进度
 		ttk.Separator(outer,orient='horizontal').pack(fill='x',pady=(0,6))
 		self.progress=ttk.Progressbar(outer,maximum=100); self.progress.pack(fill='x',pady=(0,4))
@@ -492,7 +486,7 @@ class ImageToolApp:
 			(sp_th,'相似阈值 0：严格 |  >0：近似'),(cb_keep,'重复组保留策略'),(cb_action,'重复文件动作'),
 			# 回收站提示已移除，自动处理
 			(self.move_dir_entry,'重复文件移动目标'),(self.move_dir_btn,'选择移动目录'),
-			(cb_fmt,'目标格式'),(sc_q,'拖动调整质量'),(sp_q,'直接输入质量 1-100'),(cb_same,'同格式也重新编码'),(cb_png3,'PNG 高压缩'),(cb_rm_src_convert,'转换后删除源文件'),
+			(cb_fmt,'目标格式'),(sc_q,'拖动调整质量'),(sp_q,'直接输入质量 1-100'),(cb_same,'同格式也重新编码'),(cb_png3,'PNG 高压缩'),
 			(ent_ico,'ICO 自定义尺寸: 逗号/空格分隔 例如 24,40'),
 		]
 		# 补充 ico 勾选尺寸 tips
@@ -502,7 +496,7 @@ class ImageToolApp:
 		more_tips=[
 			(self.ico_keep_cb,'仅输出原图尺寸 (忽略其它选择)'),
 			(frame_sq,'非方图处理策略 (仅 ICO 格式时有效)'),
-			(ent_pattern,'重命名模式: {name}{ext}{index}{fmt} 支持 {index:03} 指定宽度'),(sp_start,'序号起始'),(sp_step,'序号步长'),(sp_indexw,'序号零填充宽度 (0=不填)'),(cb_over,'覆盖策略'),(cb_rm_src,'删除源文件(移动而不是复制)')
+			(ent_pattern,'重命名模式: {name}{ext}{index}{fmt} 支持 {index:03} 指定宽度'),(sp_start,'序号起始'),(sp_step,'序号步长'),(sp_indexw,'序号零填充宽度 (0=不填)'),(cb_over,'覆盖策略')
 		]
 		# 比例分类提示 (新区域)
 		if hasattr(self,'frame_ratio'):
@@ -549,6 +543,9 @@ class ImageToolApp:
 		if self.worker and self.worker.is_alive():
 			messagebox.showinfo('提示','任务运行中'); return
 		self.dry_run=dry_run
+		# 清空已处理文件记录
+		self.processed_source_files.clear()
+		self.cache_to_original_map.clear()
 		# 在开始时清除缓存
 		if dry_run:
 			self._clear_cache()
@@ -685,10 +682,67 @@ class ImageToolApp:
 		self.status_var.set('预览模式 (不修改文件)')
 
 	# 管线
+	def _copy_input_to_cache(self, files):
+		"""将输入文件复制到缓存文件夹下的输入目录，返回新的文件路径列表"""
+		try:
+			# 创建缓存输入目录
+			cache_input_dir = os.path.join(self.cache_dir, 'input')
+			os.makedirs(cache_input_dir, exist_ok=True)
+			
+			input_dir = self.in_var.get().strip()
+			copied_files = []
+			
+			# 清空原始文件映射
+			self.cache_to_original_map = {}
+			
+			self.q.put('STATUS 正在复制输入文件到缓存...')
+			
+			for i, file_path in enumerate(files):
+				if self.stop_flag.is_set():
+					break
+				
+				# 计算相对路径
+				if self.single_file_mode:
+					# 单文件模式，直接使用文件名
+					relative_path = os.path.basename(file_path)
+				else:
+					# 多文件模式，保持相对路径结构
+					relative_path = os.path.relpath(file_path, input_dir)
+				
+				# 目标路径
+				cache_file_path = os.path.join(cache_input_dir, relative_path)
+				
+				# 确保目标目录存在
+				os.makedirs(os.path.dirname(cache_file_path), exist_ok=True)
+				
+				# 复制文件
+				try:
+					shutil.copy2(file_path, cache_file_path)
+					copied_files.append(cache_file_path)
+					# 记录缓存文件到原始文件的映射
+					self.cache_to_original_map[cache_file_path] = file_path
+					self.q.put(f'LOG\tCOPY_INPUT\t{relative_path}\t\t复制到缓存')
+				except Exception as e:
+					self.q.put(f'LOG\tCOPY_INPUT\t{relative_path}\t\t复制失败: {e}')
+			
+			self.q.put(f'STATUS 已复制 {len(copied_files)} 个文件到缓存')
+			return copied_files
+			
+		except Exception as e:
+			import traceback
+			error_detail = f"{str(e)} | Traceback: {traceback.format_exc().replace(chr(10), ' | ')}"
+			self.q.put(f'LOG\tCOPY_INPUT\t\t\t失败: {error_detail}')
+			return files  # 返回原始文件列表作为备用
+
 	def _pipeline(self):
-		"""执行顺序: 1分类(多文件且启用) -> 2转换 -> 3去重(多文件且启用) -> 4重命名"""
+		"""执行顺序: 0复制输入到缓存 -> 1分类(多文件且启用) -> 2转换 -> 3去重(多文件且启用) -> 4重命名 -> 5复制到最终输出(仅正常模式)"""
 		try:
 			files=self._all_files
+			# 确保缓存目录已初始化
+			self._ensure_cache_dir()
+			# 0 复制输入文件到缓存 (新增步骤)
+			files = self._copy_input_to_cache(files)
+			if self.stop_flag.is_set(): return
 			# 1 分类 (仅多文件; 单文件跳过) 提前, 影响后续路径结构
 			if not self.single_file_mode and self.classify_ratio_var.get():
 				files=self._ratio_classify_stage(files)
@@ -704,6 +758,11 @@ class ImageToolApp:
 			# 4 重命名 (最后, 保证最终命名基于已分类/去重结果)
 			if self.enable_rename.get():
 				self._rename_stage_only(files)
+			if self.stop_flag.is_set(): return
+			# 5 正常模式：将缓存中的最终结果复制到真正的输出目录
+			if not self.dry_run:
+				self._finalize_to_output()
+			
 			self.q.put('STATUS 预览完成' if self.dry_run else 'STATUS 完成')
 			# 生成预览签名
 			if self.dry_run and not self.stop_flag.is_set():
@@ -824,8 +883,6 @@ class ImageToolApp:
 		process_same=self.process_same_var.get(); quality=self.quality_var.get(); png3=self.png3_var.get()
 		pattern=self.pattern_var.get(); start=self.start_var.get(); step=self.step_var.get()
 		overwrite=OVERWRITE_MAP.get(self.overwrite_var.get(),'overwrite')
-		remove_src_on_rename=self.rename_remove_src.get()
-		remove_src_on_convert=self.convert_remove_src.get()
 		ico_sizes=None
 		if hasattr(self,'ico_keep_orig') and self.ico_keep_orig.get():
 			ico_sizes=None  # Pillow 会用原图尺寸
@@ -977,19 +1034,11 @@ class ImageToolApp:
 					ok_convert,msg_convert=convert_one(src,convert_path,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False, ico_sizes if tgt=='ico' else None, self.ico_square_mode_code() if tgt=='ico' else None)
 					if not ok_convert:
 						msg_convert = f'转换失败:{msg_convert}'
-						# 转换失败且需要删源：处理失败文件
-						if remove_src_on_convert:
-							failed_path = self._handle_failed_file(src, msg_convert, True)
-							if failed_path:
-								msg_convert += f" (文件已移至失败文件夹)"
-					elif ok_convert and remove_src_on_convert:
-						ok_del, msg_del = safe_delete(src)
-						if not ok_del:
-							msg_convert += f' (删源失败:{msg_del})'
-				# dry_run 删除模拟（放在 need_convert 处理后）
-				if self.dry_run and remove_src_on_convert and ok_convert:
-					self._simulate_delete(src)
-					msg_convert += '+删源(预览)'
+						# 转换失败时：处理失败文件
+						failed_path = self._handle_failed_file(src, msg_convert, True)
+						if failed_path:
+							msg_convert += f" (文件已移至失败文件夹)"
+				# dry_run 时不执行删源操作
 			else:
 				# 纯重命名/复制路径
 				if self.dry_run:
@@ -1000,9 +1049,6 @@ class ImageToolApp:
 						ok_convert=True
 						if os.path.abspath(src)==os.path.abspath(convert_path):
 							msg_convert='保持(预览)'
-						elif remove_src_on_rename:
-							msg_convert='移动(预览)'
-							self._simulate_delete(src)
 						else:
 							msg_convert='复制(预览)'
 					except Exception as e:
@@ -1013,8 +1059,6 @@ class ImageToolApp:
 					try:
 						if os.path.abspath(src)==os.path.abspath(convert_path):
 							ok_convert=True; msg_convert='保持'
-						elif remove_src_on_rename:
-							shutil.move(src,convert_path); ok_convert=True; msg_convert='移动'
 						else:
 							shutil.copy2(src,convert_path); ok_convert=True; msg_convert='复制'
 					except Exception as e:
@@ -1045,11 +1089,11 @@ class ImageToolApp:
 				done+=1
 				# 纯重命名（无转换）且需要重命名时，合并日志为一条
 				if will_rename and not need_convert:
-					# 判定物理操作 (复制/移动)
+					# 判定物理操作 (只使用复制)
 					if self.dry_run:
-						op='移动(预览)' if remove_src_on_rename else '复制(预览)'
+						op='复制(预览)'
 					else:
-						op='移动' if remove_src_on_rename else '复制'
+						op='复制'
 					if ok_convert and ok_rename:
 						info_line=f'重命名 - {op}'
 					else:
@@ -1071,6 +1115,11 @@ class ImageToolApp:
 				# 成功的最终文件加入列表 (失败转换不加入)
 				if (not need_convert or ok_convert) and (not will_rename or ok_rename):
 					final_paths.append(final_path if not self.dry_run else final_path)
+					# 记录成功处理的源文件（仅在正常模式下）
+					if not self.dry_run:
+						# 如果是从缓存处理的文件，记录对应的原始文件
+						original_file = self.cache_to_original_map.get(src, src)
+						self.processed_source_files.add(original_file)
 		if workers>1:
 			with ThreadPoolExecutor(max_workers=workers) as ex:
 				futs=[ex.submit(job,t) for t in tasks]
@@ -1104,13 +1153,15 @@ class ImageToolApp:
 
 	def _ratio_classify_stage(self, file_list:list[str])->list[str]:
 		"""严格按自定义比例分类: 仅命中自定义集合(±tol)的进入对应目录, 其余进入 other。
-		预览模式: 复制到缓存分类目录 (不修改源); 实际执行: 根据删源选项决定复制/移动。
+		所有模式都使用缓存目录进行中间处理，确保处理链完整。
 		返回新路径列表 (分类后路径)。"""
 		COMMON=self._parse_custom_ratios()
 		if not COMMON: return file_list
 		tol=self.ratio_tol_var.get() if hasattr(self,'ratio_tol_var') else 0.15
 		preview=self.dry_run
-		base_out=(self.cache_dir if preview else (self.out_var.get().strip() or self.in_var.get().strip()))
+		# 确保缓存目录已初始化，统一使用缓存目录进行中间处理
+		self._ensure_cache_dir()
+		base_out=self.cache_dir
 		workers=max(1,self.workers_var.get())
 		result=[]; lock=threading.Lock(); done=0; total=len(file_list)
 		def classify_one(p:str):
@@ -1157,14 +1208,8 @@ class ImageToolApp:
 						i+=1; alt=f"{base_no}_{i}{ext}"
 					dest=alt
 			try:
-				if preview:
-					shutil.copy2(p,dest)
-				else:
-					# 根据删源设置决定复制还是移动
-					if self.classify_remove_src.get():
-						shutil.move(p,dest)
-					else:
-						shutil.copy2(p,dest)
+				# 统一使用复制到缓存目录，保持源文件不变
+				shutil.copy2(p,dest)
 				self.q.put(f'LOG\tCLASSIFY\t{p}\t{dest}\t比例分类->{label}')
 				res_path=dest
 			except Exception as e:
@@ -1231,7 +1276,9 @@ class ImageToolApp:
 		remove_src_on_convert=self.convert_remove_src.get()
 		workers=max(1,self.workers_var.get())
 		real_out=self.out_var.get().strip() or self.in_var.get().strip()
-		out_dir = (self.cache_final_dir or self.cache_dir) if self.dry_run else real_out
+		# 确保缓存目录已初始化，统一使用缓存目录进行中间处理
+		self._ensure_cache_dir()
+		out_dir = (self.cache_final_dir or self.cache_dir)
 		ico_sizes=None
 		if hasattr(self,'ico_keep_orig') and self.ico_keep_orig.get():
 			ico_sizes=None
@@ -1310,11 +1357,13 @@ class ImageToolApp:
 		if not pattern: return
 		start=self.start_var.get(); step=self.step_var.get()
 		pad_width=self.index_width_var.get(); overwrite=OVERWRITE_MAP.get(self.overwrite_var.get(),'overwrite')
-		remove_src=self.rename_remove_src.get(); preview=self.dry_run
+		preview=self.dry_run
 		real_out=self.out_var.get().strip() or self.in_var.get().strip()
-		out_dir=(self.cache_final_dir or self.cache_dir) if preview else real_out
+		# 确保缓存目录已初始化，统一使用缓存目录进行中间处理
+		self._ensure_cache_dir()
+		out_dir=(self.cache_final_dir or self.cache_dir)
 		# 若文件在分类子目录内，保持相对目录
-		class_root=(self.cache_dir if preview else real_out)
+		class_root=self.cache_dir
 		
 		# 按目录分组，每个目录独立编号（如果启用了分类）
 		if self.classify_ratio_var.get():
@@ -1330,16 +1379,16 @@ class ImageToolApp:
 				for f in dir_files:
 					if self.stop_flag.is_set(): break
 					if not os.path.isfile(f): continue
-					idx = self._process_rename_file(f, pattern, idx, step, pad_width, overwrite, remove_src, preview, out_dir, class_root)
+					idx = self._process_rename_file(f, pattern, idx, step, pad_width, overwrite, preview, out_dir, class_root)
 		else:
 			# 未启用分类时保持原逻辑
 			idx = start
 			for f in files:
 				if self.stop_flag.is_set(): break
 				if not os.path.isfile(f): continue
-				idx = self._process_rename_file(f, pattern, idx, step, pad_width, overwrite, remove_src, preview, out_dir, class_root)
+				idx = self._process_rename_file(f, pattern, idx, step, pad_width, overwrite, preview, out_dir, class_root)
 
-	def _process_rename_file(self, f, pattern, idx, step, pad_width, overwrite, remove_src, preview, out_dir, class_root):
+	def _process_rename_file(self, f, pattern, idx, step, pad_width, overwrite, preview, out_dir, class_root):
 		"""处理单个文件的重命名，返回下一个索引值"""
 		ext=norm_ext(f); stem=os.path.splitext(os.path.basename(f))[0]
 		name_raw=pattern
@@ -1381,22 +1430,119 @@ class ImageToolApp:
 		try:
 			if preview:
 				shutil.copy2(f,dest)
-				if remove_src and os.path.exists(f):
-					self._simulate_delete(f)
 			else:
-				# 正常模式下，重命名操作总是移动文件（删除源文件），这是重命名的预期行为
+				# 正常模式下在缓存目录中操作，也使用移动避免重复文件
 				shutil.move(f,dest)
 			self.q.put(f'LOG\tRENAME\t{f}\t{dest}\t重命名')
 		except Exception as e:
 			import traceback
 			error_detail = f"{str(e)} | Traceback: {traceback.format_exc().replace(chr(10), ' | ')}"
-			# 重命名失败且需要删源：处理失败文件
-			if remove_src:
-				failed_path = self._handle_failed_file(f, error_detail, True)
-				if failed_path:
-					error_detail += f" (文件已移至失败文件夹)"
+			# 重命名失败处理
 			self.q.put(f'LOG\tRENAME\t{f}\t{dest}\t失败:{error_detail}')
 		return idx + step
+
+	def _finalize_to_output(self):
+		"""正常模式：将缓存目录中的最终结果复制到真正的输出目录"""
+		try:
+			real_out = self.out_var.get().strip() or self.in_var.get().strip()
+			if not real_out or not os.path.exists(self.cache_dir):
+				return
+			
+			# 确保输出目录存在
+			os.makedirs(real_out, exist_ok=True)
+			
+			# 清理输出目录中的文件，但保留缓存目录
+			if os.path.exists(real_out):
+				for item in os.listdir(real_out):
+					item_path = os.path.join(real_out, item)
+					# 跳过缓存目录
+					if item == '.preview_cache':
+						continue
+					# 删除其他文件和目录
+					try:
+						if os.path.isdir(item_path):
+							shutil.rmtree(item_path)
+						else:
+							os.remove(item_path)
+					except Exception:
+						pass  # 忽略删除错误
+			
+			# 使用 _final 目录作为源（如果存在），否则使用缓存目录
+			source_dir = self.cache_final_dir if (self.cache_final_dir and os.path.exists(self.cache_final_dir)) else self.cache_dir
+			
+			# 复制所有文件到输出目录
+			file_count = 0
+			for root, dirs, files in os.walk(source_dir):
+				# 跳过 _trash 目录
+				if '_trash' in root:
+					continue
+					
+				for file in files:
+					if self.stop_flag.is_set():
+						break
+						
+					src_path = os.path.join(root, file)
+					if not os.path.isfile(src_path):
+						continue
+					
+					# 计算相对路径
+					rel_path = os.path.relpath(src_path, source_dir)
+					dest_path = os.path.join(real_out, rel_path)
+					
+					# 确保目标目录存在
+					os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+					
+					# 复制文件到输出目录
+					try:
+						shutil.copy2(src_path, dest_path)
+						file_count += 1
+						self.q.put(f'LOG\tFINALIZE\t{src_path}\t{dest_path}\t复制到输出')
+					except Exception as e:
+						self.q.put(f'LOG\tFINALIZE\t{src_path}\t{dest_path}\t复制失败:{e}')
+			
+			self.q.put(f'LOG\tFINALIZE\t\t\t完成，共复制 {file_count} 个文件到 {real_out}')
+			
+			# 最后一步：如果启用删源功能，删除输入文件夹中的原始文件
+			if self.global_remove_src.get():
+				self._remove_source_files()
+			
+		except Exception as e:
+			import traceback
+			error_detail = f"{str(e)} | Traceback: {traceback.format_exc().replace(chr(10), ' | ')}"
+			self.q.put(f'LOG\tFINALIZE\t\t\t失败: {error_detail}')
+
+	def _remove_source_files(self):
+		"""删除输入文件夹中已成功处理的原始文件"""
+		try:
+			input_dir = self.in_var.get().strip()
+			if not input_dir or not os.path.exists(input_dir):
+				return
+			
+			# 删除记录中的已处理文件
+			deleted_count = 0
+			failed_count = 0
+			
+			for source_file in self.processed_source_files:
+				if self.stop_flag.is_set():
+					break
+					
+				if not os.path.exists(source_file):
+					continue  # 文件可能已经被删除
+				
+				try:
+					os.remove(source_file)
+					deleted_count += 1
+					self.q.put(f'LOG\tREMOVE_SRC\t{source_file}\t\t删除原始文件')
+				except Exception as e:
+					failed_count += 1
+					self.q.put(f'LOG\tREMOVE_SRC\t{source_file}\t\t删除失败: {e}')
+			
+			self.q.put(f'LOG\tREMOVE_SRC\t\t\t完成，删除 {deleted_count} 个文件，失败 {failed_count} 个')
+			
+		except Exception as e:
+			import traceback
+			error_detail = f"{str(e)} | Traceback: {traceback.format_exc().replace(chr(10), ' | ')}"
+			self.q.put(f'LOG\tREMOVE_SRC\t\t\t失败: {error_detail}')
 
 	# (删除重复的旧 _ratio_classify_stage 定义)
 
