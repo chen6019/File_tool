@@ -1061,6 +1061,46 @@ class ImageToolApp:
 		
 		return image_files, non_image_files
 
+	def _find_deepest_final_dir(self):
+		"""查找最深层的 _final 文件夹"""
+		if not self.cache_dir or not os.path.exists(self.cache_dir):
+			return None
+		
+		deepest_final = None
+		max_depth = -1
+		
+		# 遍历缓存目录，查找所有 _final 文件夹
+		for root, dirs, files in os.walk(self.cache_dir):
+			for dir_name in dirs:
+				if dir_name == '_final':
+					final_path = os.path.join(root, dir_name)
+					# 计算深度（相对于缓存目录的深度）
+					relative_path = os.path.relpath(final_path, self.cache_dir)
+					depth = len(relative_path.split(os.sep))
+					
+					# 记录最深的 _final 目录
+					if depth > max_depth:
+						max_depth = depth
+						deepest_final = final_path
+		
+		# 验证找到的目录确实存在且不为空
+		if deepest_final and os.path.exists(deepest_final):
+			# 检查目录是否包含文件（包括子目录中的文件）
+			has_files = False
+			for root, dirs, files in os.walk(deepest_final):
+				if files:
+					has_files = True
+					break
+			
+			if has_files:
+				return deepest_final
+		
+		# 如果没有找到合适的 _final 目录，尝试使用默认的 cache_final_dir
+		if self.cache_final_dir and os.path.exists(self.cache_final_dir):
+			return self.cache_final_dir
+		
+		return None
+
 	# 管线
 	def _copy_files_to_final(self, files):
 		"""当没有启用任何处理功能时，将输入文件复制到final目录"""
@@ -1902,8 +1942,10 @@ class ImageToolApp:
 					except Exception:
 						pass  # 忽略删除错误
 			
-			# 使用 _final 目录作为源（如果存在），否则使用缓存目录
-			source_dir = self.cache_final_dir if (self.cache_final_dir and os.path.exists(self.cache_final_dir)) else self.cache_dir
+			# 查找最深层的 _final 目录作为源
+			source_dir = self._find_deepest_final_dir()
+			if not source_dir:
+				source_dir = self.cache_dir
 			
 			# 复制所有文件到输出目录
 			file_count = 0
