@@ -2233,7 +2233,7 @@ class ImageToolApp:
 		class_root=self.cache_dir
 		
 		# 按目录分组，每个目录独立编号（如果启用了分类）
-		if self.classify_ratio_var.get():
+		if self.classify_ratio_var.get() or self.classify_shape_var.get():
 			from collections import defaultdict
 			dir_groups = defaultdict(list)
 			for f in files:
