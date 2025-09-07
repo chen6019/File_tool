@@ -324,7 +324,7 @@ class ImageToolApp:
 		self._tooltip=None; self._tooltip_after=None
 		self.frame_convert=None; self.frame_rename=None
 		self.move_dir_entry=None; self.move_dir_btn=None
-		self.dry_run=False
+		self.write_to_output=True
 		self.single_file_mode=False
 		self._ratio_map={}  # 路径 -> 比例标签
 		# 回收站逻辑自动化 (send2trash 可用即使用)
@@ -447,7 +447,7 @@ class ImageToolApp:
 		# 统一的删源选项
 		self.global_remove_src=tk.BooleanVar(value=False)
 		cb_global_rm_src=ttk.Checkbutton(opts,text='删源',variable=self.global_remove_src); cb_global_rm_src.pack(side='left',padx=(8,0))
-		btn_start=ttk.Button(opts,text='开始',command=self._start,width=8); btn_start.pack(side='right',padx=2)
+		btn_start=ttk.Button(opts,text='开始',command=lambda: self._start(write_to_output=True),width=8); btn_start.pack(side='right',padx=2)
 		btn_preview=ttk.Button(opts,text='预览',command=self._preview,width=8); btn_preview.pack(side='right',padx=2)
 		btn_cancel=ttk.Button(opts,text='取消',command=self._cancel,width=8); btn_cancel.pack(side='right',padx=2)
 		# 分类 (第一阶段)
@@ -893,20 +893,16 @@ class ImageToolApp:
 			self.q.put(f'LOG\tCONVERT\t{src_file}\t\t跳过转换失败:{e}')
 			return None
 
-	def _start(self, dry_run:bool=False):
+	def _start(self, write_to_output:bool=True):
 		if self.worker and self.worker.is_alive():
 			messagebox.showinfo('提示','任务运行中'); return
-		self.dry_run=dry_run
+		self.write_to_output=write_to_output
 		# 清空已处理文件记录
 		self.processed_source_files.clear()
 		self.cache_to_original_map.clear()
-		# 在开始时清除缓存
-		if dry_run:
-			self._clear_cache()
-			self._ensure_cache_dir()
-		else:
-				# 直接清除旧缓存 (取消快速提交逻辑)
-				self._clear_cache()
+		# 统一清除缓存并初始化缓存目录
+		self._clear_cache()
+		self._ensure_cache_dir()
 		inp=self.in_var.get().strip()
 		if not inp: 
 			self.status_var.set('未选择输入'); return
@@ -986,7 +982,7 @@ class ImageToolApp:
 		
 		for i in self.log.get_children(): self.log.delete(i)
 		self.progress['value']=0; self.progress['maximum']=len(self._all_files)
-		self.status_var.set('开始...' if not dry_run else '预览模式 (不修改文件)')
+		self.status_var.set('开始...' if write_to_output else '预览模式 (不修改文件)')
 		self.stop_flag.clear(); self.last_out_dir=out_dir
 		self.worker=threading.Thread(target=self._pipeline,daemon=True); self.worker.start()
 
@@ -995,7 +991,7 @@ class ImageToolApp:
 
 	def _open_last_out(self):
 		# 预览模式下无条件优先打开缓存目录 (更符合“查看预览结果”需求)
-		if self.dry_run:
+		if not getattr(self, 'write_to_output', True):
 			try:
 				self._ensure_cache_dir()
 			except Exception:
@@ -1114,7 +1110,7 @@ class ImageToolApp:
 	def _preview(self):
 		if self.worker and self.worker.is_alive():
 			messagebox.showinfo('提示','任务运行中'); return
-		self._start(dry_run=True)
+		self._start(write_to_output=False)
 		self.status_var.set('预览模式 (不修改文件)')
 
 	def _update_preview_ui(self, src_data, result_data):
@@ -1467,7 +1463,7 @@ class ImageToolApp:
 			if self.stop_flag.is_set(): return
 			
 			# 4.5 如果没有启用任何处理功能，需要将文件复制到final目录
-			if not self.dry_run and not any([
+			if not any([
 				not self.single_file_mode and self.classify_ratio_var.get(),
 				not self.single_file_mode and self.classify_shape_var.get(),
 				self.enable_convert.get(),
@@ -1476,18 +1472,18 @@ class ImageToolApp:
 			]):
 				self._copy_files_to_final(files)
 			
-			# 5 正常模式：将缓存中的最终结果复制到真正的输出目录
+			# 5 将缓存中的最终结果复制到真正的输出目录（仅执行模式）
 			remove_info = ""
-			if not self.dry_run:
+			if self.write_to_output:
 				remove_info = self._finalize_to_output()
 			
 			# 合并完成状态信息
-			if self.dry_run:
+			if not self.write_to_output:
 				self.q.put('STATUS 预览完成')
 			else:
 				self.q.put(f'STATUS 完成{remove_info}')
 			# 生成预览签名
-			if self.dry_run and not self.stop_flag.is_set():
+			if not self.write_to_output and not self.stop_flag.is_set():
 				self._last_preview_signature=self._calc_preview_signature()
 				self._last_preview_files=[(p, os.path.getmtime(p), os.path.getsize(p)) for p in self._all_files if os.path.isfile(p)]
 		except Exception as e:
@@ -1496,7 +1492,8 @@ class ImageToolApp:
 			self.q.put(f'STATUS 失败: {full_error}')
 			print(f"[CRITICAL ERROR] Pipeline failed: {full_error}")
 		finally:
-			self.dry_run=False
+			# 重置写入标志
+			self.write_to_output=True
 
 	def is_animated_image(self, path: str) -> bool:
 		"""检测图片是否为动图 (GIF, WebP, APNG)"""
@@ -1579,14 +1576,14 @@ class ImageToolApp:
 			for o in (x for x in g if x is not keep):
 				act='保留'
 				if action=='delete' and not self.stop_flag.is_set():
-					if self.dry_run:
+					if not self.write_to_output:
 						act='删除(预览)'
 						self._simulate_delete(o.path)
 					else:
 						ok,msg = safe_delete(o.path)
 						act=msg if ok else msg
 				elif action=='move' and move_dir and not self.stop_flag.is_set():
-					if self.dry_run:
+					if not self.write_to_output:
 						act='移动(预览)'
 					else:
 						try:
@@ -1686,7 +1683,7 @@ class ImageToolApp:
 						if overwrite=='skip':
 							self.q.put(f'LOG\tCONVERT\t{f}\t{final_path}\t跳过(存在)'); local_idx+=step; continue
 						elif overwrite=='rename':
-							final_path=next_non_conflict(final_path) if not self.dry_run else final_path+"(预览改名)"
+							final_path=next_non_conflict(final_path) if self.write_to_output else final_path+"(预览改名)"
 					will_rename = (final_basename != default_basename)
 					if need_convert:
 						convert_basename = default_basename if will_rename else final_basename
@@ -1720,7 +1717,7 @@ class ImageToolApp:
 					if overwrite=='skip':
 						self.q.put(f'LOG\tCONVERT\t{f}\t{final_path}\t跳过(存在)'); idx+=step; continue
 					elif overwrite=='rename':
-						final_path=next_non_conflict(final_path) if not self.dry_run else final_path+"(预览改名)"
+						final_path=next_non_conflict(final_path) if self.write_to_output else final_path+"(预览改名)"
 				will_rename=False
 				if need_convert:
 					convert_basename = final_basename
@@ -1737,7 +1734,7 @@ class ImageToolApp:
 			src,need_convert,tgt,convert_path,final_path,will_rename,convert_basename,final_basename,_idx=spec
 			if self.stop_flag.is_set(): return
 			# 预览时使用缓存路径
-			if self.dry_run:
+			if not self.write_to_output:
 				# 将所有目标映射到缓存；区分转换/复制与重命名阶段
 				if need_convert:
 					convert_path = os.path.join(self.cache_dir, convert_basename)
@@ -1750,7 +1747,7 @@ class ImageToolApp:
 				os.makedirs(os.path.dirname(convert_path),exist_ok=True)
 			msg_convert=''; ok_convert=True
 			if need_convert:
-				if self.dry_run:
+				if not self.write_to_output:
 					# 实际执行一次到缓存，保证可预览
 					ok_convert,msg_convert=convert_one(src,convert_path,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False, ico_sizes if tgt=='ico' else None, self.ico_square_mode_code() if tgt=='ico' else None)
 					if ok_convert:
@@ -1765,10 +1762,10 @@ class ImageToolApp:
 						failed_path = self._handle_failed_file(src, msg_convert, True)
 						if failed_path:
 							msg_convert += f" (文件已移至失败文件夹)"
-				# dry_run 时不执行删源操作
+				# 预览模式时不执行删源操作
 			else:
 				# 纯重命名/复制路径
-				if self.dry_run:
+				if not self.write_to_output:
 					# 预览: 复制源到中间(或最终)缓存，保证存在
 					try:
 						if os.path.abspath(src)!=os.path.abspath(convert_path):
@@ -1799,7 +1796,7 @@ class ImageToolApp:
 			# 如果需要重命名(第二阶段)
 			msg_rename=''; ok_rename=True
 			if will_rename:
-				if self.dry_run:
+				if not self.write_to_output:
 					try:
 						if convert_path!=final_path:
 							# 确保目标目录存在
@@ -1825,7 +1822,7 @@ class ImageToolApp:
 				# 纯重命名（无转换）且需要重命名时，合并日志为一条
 				if will_rename and not need_convert:
 					# 判定物理操作 (只使用复制)
-					if self.dry_run:
+					if not self.write_to_output:
 						op='复制(预览)'
 					else:
 						op='复制'
@@ -1849,9 +1846,9 @@ class ImageToolApp:
 				self.q.put(f'PROG {done} {total}')
 				# 成功的最终文件加入列表 (失败转换不加入)
 				if (not need_convert or ok_convert) and (not will_rename or ok_rename):
-					final_paths.append(final_path if not self.dry_run else final_path)
+					final_paths.append(final_path)
 					# 记录成功处理的源文件（仅在正常模式下）
-					if not self.dry_run:
+					if self.write_to_output:
 						# 如果是从缓存处理的文件，记录对应的原始文件
 						original_file = self.cache_to_original_map.get(src, src)
 						self.processed_source_files.add(original_file)
@@ -1893,11 +1890,11 @@ class ImageToolApp:
 		COMMON=self._parse_custom_ratios()
 		if not COMMON: return file_list
 		tol=self.ratio_tol_var.get() if hasattr(self,'ratio_tol_var') else 0.15
-		preview=self.dry_run
+		preview=not self.write_to_output
 		# 确保缓存目录已初始化，统一使用缓存目录进行中间处理
 		self._ensure_cache_dir()
-		# 根据模式选择输出目录：预览模式用缓存目录，正常模式用final目录
-		base_out = self.cache_dir if preview else self.cache_final_dir
+		# 统一使用缓存final目录进行分类处理
+		base_out = self.cache_final_dir
 		workers=max(1,self.workers_var.get())
 		result=[]; lock=threading.Lock(); done=0; total=len(file_list)
 		def classify_one(p:str):
