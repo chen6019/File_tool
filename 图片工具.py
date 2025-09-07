@@ -677,7 +677,8 @@ class ImageToolApp:
 			try:
 				os.makedirs(out_dir,exist_ok=True)
 			except PermissionError:
-				self.status_var.set('输出文件夹创建失败：权限不足'); return
+				messagebox.showerror('权限错误', '输出文件夹创建失败：权限不足')
+				self.status_var.set('权限错误'); return
 			except Exception as e:
 				self.status_var.set(f'输出文件夹创建失败：{e}'); return
 			
@@ -686,7 +687,8 @@ class ImageToolApp:
 				all_files, non_image_files = self._scan_directory_files(root_dir, self.recursive_var.get())
 				self._all_files = all_files
 			except PermissionError:
-				self.status_var.set('输入文件夹无读取权限'); return
+				messagebox.showerror('权限错误', '输入文件夹无读取权限')
+				self.status_var.set('权限错误'); return
 			except Exception as e:
 				self.status_var.set(f'读取输入文件夹失败：{e}'); return
 			
@@ -721,7 +723,8 @@ class ImageToolApp:
 			try:
 				os.makedirs(out_dir,exist_ok=True)
 			except PermissionError:
-				self.status_var.set('输出文件夹创建失败：权限不足'); return
+				messagebox.showerror('权限错误', '输出文件夹创建失败：权限不足')
+				self.status_var.set('权限错误'); return
 			except Exception as e:
 				self.status_var.set(f'输出文件夹创建失败：{e}'); return
 			
@@ -1013,12 +1016,19 @@ class ImageToolApp:
 				if not recursive:
 					break
 		except PermissionError:
-			# 如果遇到权限问题，返回已扫描的结果
-			pass
+			# 如果遇到权限问题，抛出异常让上层处理
+			raise PermissionError("扫描目录时权限不足")
 		except Exception as e:
 			print(f"扫描目录时出错：{e}")
 		
 		return image_files, non_image_files
+
+	def _show_permission_error(self, operation, details=""):
+		"""显示权限错误弹窗"""
+		message = f"操作失败：{operation}\n权限不足"
+		if details:
+			message += f"\n详情：{details}"
+		messagebox.showerror('权限错误', message)
 
 	def _find_deepest_final_dir(self):
 		"""查找最深层的 _final 文件夹"""
@@ -1140,7 +1150,7 @@ class ImageToolApp:
 					self.cache_to_original_map[cache_file_path] = file_path
 					# 不再显示每个文件的复制日志
 				except PermissionError:
-					self.q.put(f'LOG\tCOPY_INPUT\t{relative_path}\t\t复制失败: 权限不足')
+					self.q.put(f'PERMISSION_ERROR\t复制输入文件\t权限不足')
 				except Exception as e:
 					self.q.put(f'LOG\tCOPY_INPUT\t{relative_path}\t\t复制失败: {e}')
 			
@@ -1259,6 +1269,8 @@ class ImageToolApp:
 				with Image.open(path) as im:  # type: ignore
 					w,h=im.size; ah=ahash(im); dh=dhash(im); st=os.stat(path)
 				info=ImgInfo(path,st.st_size,w,h,ah,dh,st.st_mtime)
+			except PermissionError:
+				info=None
 			except Exception:
 				info=None
 			with lock:
@@ -1351,7 +1363,10 @@ class ImageToolApp:
 					with Image.open(f) as im:
 						if im.size[0]!=im.size[1]:
 							warn_needed=True; break
-				except Exception: pass
+				except PermissionError:
+					pass  # 跳过无权限的文件
+				except Exception: 
+					pass
 			if warn_needed and self.ico_square_mode.get()=='keep':
 				self.q.put('STATUS 检测到非方图, ICO 可能被拉伸, 可选择裁切/填充方式')
 		# 按目录分组以实现“分类后每个目录独立排序编号”
@@ -1620,6 +1635,8 @@ class ImageToolApp:
 			try:
 				with Image.open(p) as im:
 					w,h=im.size
+			except PermissionError:
+				with lock: done+=1; return p
 			except Exception:
 				with lock: done+=1; return p
 			if h==0:
@@ -1944,7 +1961,7 @@ class ImageToolApp:
 						file_count += 1
 						self.q.put(f'LOG\tFINALIZE\t{src_path}\t{dest_path}\t复制到输出')
 					except PermissionError:
-						self.q.put(f'LOG\tFINALIZE\t{src_path}\t{dest_path}\t复制失败：权限不足')
+						self.q.put(f'PERMISSION_ERROR\t文件复制\t复制到输出目录权限不足')
 					except Exception as e:
 						self.q.put(f'LOG\tFINALIZE\t{src_path}\t{dest_path}\t复制失败:{e}')
 			
@@ -2003,7 +2020,7 @@ class ImageToolApp:
 					self.q.put(f'LOG\tREMOVE_SRC\t{source_file}\t\t删除原始文件')
 				except PermissionError:
 					failed_count += 1
-					self.q.put(f'LOG\tREMOVE_SRC\t{source_file}\t\t删除失败: 权限不足')
+					self.q.put(f'PERMISSION_ERROR\t删除原始文件\t文件删除权限不足')
 				except Exception as e:
 					failed_count += 1
 					self.q.put(f'LOG\tREMOVE_SRC\t{source_file}\t\t删除失败: {e}')
@@ -2040,6 +2057,13 @@ class ImageToolApp:
 					self.status_var.set(f'处理 {pct}% ({d}/{total})')
 				elif m.startswith('STATUS '):
 					self.status_var.set(m[7:])
+				elif m.startswith('PERMISSION_ERROR\t'):
+					# 处理权限错误
+					try:
+						_tag, operation, details = m.split('\t', 2)
+						self._show_permission_error(operation, details)
+					except Exception:
+						pass
 				elif m.startswith('LOG\t'):
 					try:
 						_tag,stage,src,dst,info=m.split('\t',4)
