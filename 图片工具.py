@@ -1197,24 +1197,30 @@ class ImageToolApp:
 			if not os.path.isfile(p):
 				with lock: done+=1; return p
 			
-			# 优先检查是否为动图
+			# 检查是否为动图并获取尺寸信息
 			is_animated = self.is_animated_image(p)
+			try:
+				with Image.open(p) as im:
+					w,h=im.size
+			except Exception:
+				with lock: done+=1; return p
+			if h==0:
+				with lock: done+=1; return p
+			
+			# 计算比例分类
+			ratio=w/h; ratio_label='other'
+			for rw,rh,lab in COMMON:
+				ideal=rw/rh
+				if ideal!=0 and abs(ratio-ideal)/ideal <= tol:
+					ratio_label=lab; break
+			
+			# 根据是否为动图确定最终分类
 			if is_animated:
-				label = 'animated'
+				# 动图进行二次分类：animated/比例分类
+				label = f'animated/{ratio_label}'
 			else:
-				# 按比例分类静态图片
-				try:
-					with Image.open(p) as im:
-						w,h=im.size
-				except Exception:
-					with lock: done+=1; return p
-				if h==0:
-					with lock: done+=1; return p
-				ratio=w/h; label='other'
-				for rw,rh,lab in COMMON:
-					ideal=rw/rh
-					if ideal!=0 and abs(ratio-ideal)/ideal <= tol:
-						label=lab; break
+				# 静态图片直接按比例分类
+				label = ratio_label
 			
 			dir_ratio=os.path.join(base_out,label)
 			if not os.path.isdir(dir_ratio):
