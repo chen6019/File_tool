@@ -1264,8 +1264,8 @@ class ImageToolApp:
 			
 			# 根据是否为动图确定最终分类
 			if is_animated:
-				# 动图进行二次分类：animated/比例分类
-				label = f'animated/{ratio_label}'
+				# 动图进行二次分类：AM/比例分类
+				label = f'AM/{ratio_label}'
 			else:
 				# 静态图片直接按比例分类
 				label = ratio_label
