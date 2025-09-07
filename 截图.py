@@ -27,8 +27,8 @@ class ScreenshotApp:
 		# 状态提示
 		# 状态提示样式
 		# 版权声明
-		self.copyright_label = ttk.Label(self.root, text="陈建金版权所有", foreground='gray', font=('Arial', 8))
-		self.copyright_label.grid(row=2, column=0, pady=5, sticky=tk.S)
+		# self.copyright_label = ttk.Label(self.root, text="陈建金版权所有", foreground='gray', font=('Arial', 8))
+		# self.copyright_label.grid(row=2, column=0, pady=5, sticky=tk.S)
 
 		# 状态提示
 		self.status_label = ttk.Label(self.frame, text="准备就绪", foreground='green', font=('Arial', 10))
