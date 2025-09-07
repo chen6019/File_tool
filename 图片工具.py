@@ -502,26 +502,32 @@ class ImageToolApp:
 		shape_frame.columnconfigure(5,weight=1)
 		
 		# 第一行：容差设置
-		ttk.Label(shape_frame,text='容差').grid(row=0,column=0,sticky='e')
+		lbl_shape_tol=ttk.Label(shape_frame,text='容差')
+		lbl_shape_tol.grid(row=0,column=0,sticky='e')
 		sp_shape_tol=ttk.Spinbox(shape_frame,from_=0.01,to=0.5,increment=0.01,textvariable=self.shape_tolerance_var,width=8,format='%.2f')
 		sp_shape_tol.grid(row=0,column=1,sticky='w',padx=(4,12))
-		ttk.Label(shape_frame,text='(方形判定容差，默认0.05=±5%)').grid(row=0,column=2,sticky='w',columnspan=3)
+		lbl_shape_tol_desc=ttk.Label(shape_frame,text='(方形判定容差，默认0.05=±5%)')
+		lbl_shape_tol_desc.grid(row=0,column=2,sticky='w',columnspan=3)
 		
 		# 第二行：文件夹名称设置
-		ttk.Label(shape_frame,text='文件夹').grid(row=1,column=0,sticky='e',pady=(4,0))
+		lbl_shape_folder=ttk.Label(shape_frame,text='文件夹')
+		lbl_shape_folder.grid(row=1,column=0,sticky='e',pady=(4,0))
 		
 		folder_settings_frame = ttk.Frame(shape_frame)
 		folder_settings_frame.grid(row=1,column=1,columnspan=4,sticky='we',pady=(4,2))
 		
-		ttk.Label(folder_settings_frame,text='方形:').pack(side='left')
+		lbl_square=ttk.Label(folder_settings_frame,text='方形:')
+		lbl_square.pack(side='left')
 		ent_square=ttk.Entry(folder_settings_frame,textvariable=self.shape_square_name,width=8)
 		ent_square.pack(side='left',padx=(2,8))
 		
-		ttk.Label(folder_settings_frame,text='横向:').pack(side='left')
+		lbl_horizontal=ttk.Label(folder_settings_frame,text='横向:')
+		lbl_horizontal.pack(side='left')
 		ent_horizontal=ttk.Entry(folder_settings_frame,textvariable=self.shape_horizontal_name,width=8)
 		ent_horizontal.pack(side='left',padx=(2,8))
 		
-		ttk.Label(folder_settings_frame,text='纵向:').pack(side='left')
+		lbl_vertical=ttk.Label(folder_settings_frame,text='纵向:')
+		lbl_vertical.pack(side='left')
 		ent_vertical=ttk.Entry(folder_settings_frame,textvariable=self.shape_vertical_name,width=8)
 		ent_vertical.pack(side='left',padx=(2,8))
 		
@@ -539,6 +545,13 @@ class ImageToolApp:
 		self._shape_ent_horizontal=ent_horizontal
 		self._shape_ent_vertical=ent_vertical
 		self._shape_btn_reset=btn_reset_shape
+		# 保存标签引用
+		self._shape_lbl_tol=lbl_shape_tol
+		self._shape_lbl_tol_desc=lbl_shape_tol_desc
+		self._shape_lbl_folder=lbl_shape_folder
+		self._shape_lbl_square=lbl_square
+		self._shape_lbl_horizontal=lbl_horizontal
+		self._shape_lbl_vertical=lbl_vertical
 		
 		# # 形状分类说明
 		# shape_info_frame = ttk.Frame(shape_frame)
@@ -2795,6 +2808,12 @@ class ImageToolApp:
 				enabled=self.classify_shape_var.get()
 				# 形状分类区域的基础控件启用/禁用
 				for widget in (getattr(self,'_shape_sp_tol',None), getattr(self,'_shape_ent_square',None), getattr(self,'_shape_ent_horizontal',None), getattr(self,'_shape_ent_vertical',None), getattr(self,'_shape_btn_reset',None)):
+					if widget:
+						state='normal' if enabled else 'disabled'
+						try: widget.configure(state=state)
+						except Exception: pass
+				# 形状分类区域的标签启用/禁用
+				for widget in (getattr(self,'_shape_lbl_tol',None), getattr(self,'_shape_lbl_tol_desc',None), getattr(self,'_shape_lbl_folder',None), getattr(self,'_shape_lbl_square',None), getattr(self,'_shape_lbl_horizontal',None), getattr(self,'_shape_lbl_vertical',None)):
 					if widget:
 						state='normal' if enabled else 'disabled'
 						try: widget.configure(state=state)
