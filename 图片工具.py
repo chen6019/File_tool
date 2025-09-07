@@ -701,6 +701,44 @@ class ImageToolApp:
 		self.status_var.set('预览模式 (不修改文件)')
 
 	# 管线
+	def _copy_files_to_final(self, files):
+		"""当没有启用任何处理功能时，将输入文件复制到final目录"""
+		try:
+			self._ensure_cache_dir()
+			for src_file in files:
+				if self.stop_flag.is_set():
+					break
+				if not os.path.exists(src_file):
+					continue
+				
+				# 计算相对路径，保持目录结构
+				if self.single_file_mode:
+					rel_path = os.path.basename(src_file)
+				else:
+					# 计算相对于缓存输入目录的路径
+					cache_input_dir = os.path.join(self.cache_dir, 'input')
+					try:
+						rel_path = os.path.relpath(src_file, cache_input_dir)
+					except ValueError:
+						rel_path = os.path.basename(src_file)
+				
+				# 目标路径
+				dest_file = os.path.join(self.cache_final_dir, rel_path)
+				
+				# 确保目标目录存在
+				os.makedirs(os.path.dirname(dest_file), exist_ok=True)
+				
+				# 复制文件
+				try:
+					shutil.copy2(src_file, dest_file)
+					self.q.put(f'LOG\tCOPY_FINAL\t{src_file}\t{dest_file}\t复制到最终目录')
+				except Exception as e:
+					self.q.put(f'LOG\tCOPY_FINAL\t{src_file}\t{dest_file}\t复制失败: {e}')
+		except Exception as e:
+			import traceback
+			error_detail = f"{str(e)} | Traceback: {traceback.format_exc().replace(chr(10), ' | ')}"
+			self.q.put(f'LOG\tCOPY_FINAL\t\t\t失败: {error_detail}')
+
 	def _copy_input_to_cache(self, files):
 		"""将输入文件复制到缓存文件夹下的输入目录，返回新的文件路径列表"""
 		try:
@@ -780,6 +818,16 @@ class ImageToolApp:
 			if self.enable_rename.get():
 				self._rename_stage_only(files)
 			if self.stop_flag.is_set(): return
+			
+			# 4.5 如果没有启用任何处理功能，需要将文件复制到final目录
+			if not self.dry_run and not any([
+				not self.single_file_mode and self.classify_ratio_var.get(),
+				self.enable_convert.get(),
+				not self.single_file_mode and self.enable_dedupe.get(),
+				self.enable_rename.get()
+			]):
+				self._copy_files_to_final(files)
+			
 			# 5 正常模式：将缓存中的最终结果复制到真正的输出目录
 			remove_info = ""
 			if not self.dry_run:
@@ -1338,17 +1386,22 @@ class ImageToolApp:
 			tgt_fmt=fmt if self.enable_convert.get() else src_ext
 			need_convert=self.enable_convert.get() and (src_ext!=fmt or process_same)
 			if not need_convert:
-				if preview:
-					try:
-						rel_dir=os.path.relpath(os.path.dirname(f), class_root)
-						if rel_dir=='.': rel_dir=''
-						dst_dir=os.path.join(out_dir, rel_dir)
-						os.makedirs(dst_dir, exist_ok=True)
-						dest_placeholder=os.path.join(dst_dir, os.path.basename(f))
-						if not os.path.exists(dest_placeholder): shutil.copy2(f, dest_placeholder)
-					except Exception: pass
+				try:
+					rel_dir=os.path.relpath(os.path.dirname(f), class_root)
+					if rel_dir=='.': rel_dir=''
+					dst_dir=os.path.join(out_dir, rel_dir)
+					os.makedirs(dst_dir, exist_ok=True)
+					dest_placeholder=os.path.join(dst_dir, os.path.basename(f))
+					if not os.path.exists(dest_placeholder): 
+						shutil.copy2(f, dest_placeholder)
+						if not preview:
+							self.q.put(f'LOG\tCONVERT\t{f}\t{dest_placeholder}\t无需转换')
+				except Exception as e:
+					if not preview:
+						self.q.put(f'LOG\tCONVERT\t{f}\t\t复制失败: {e}')
 				with lock:
-					results[i]=f; done+=1; self.q.put(f'PROG {done} {total}')
+					results[i]=dest_placeholder if 'dest_placeholder' in locals() else f
+					done+=1; self.q.put(f'PROG {done} {total}')
 				return
 			basename=os.path.splitext(os.path.basename(f))[0]
 			out_name=f"{basename}.{tgt_fmt}"
