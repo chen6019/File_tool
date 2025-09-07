@@ -333,6 +333,7 @@ class ImageToolApp:
 		self.cache_dir=None  # 预览缓存文件夹
 		# 跳过格式的变量
 		self.skip_formats_enabled = tk.BooleanVar()  # 是否启用跳过功能
+		self.skip_convert_only = tk.BooleanVar()  # 是否仅在格式转换时跳过
 		self.skip_jpeg = tk.BooleanVar()
 		self.skip_png = tk.BooleanVar()
 		self.skip_webp = tk.BooleanVar()
@@ -374,11 +375,14 @@ class ImageToolApp:
 		btn_open_out=ttk.Button(io,text='打开',command=self._open_last_out,width=6); btn_open_out.grid(row=0,column=8,padx=(4,0))
 		
 		# 跳过格式设置 (全局输入过滤)
-		skip_frame=ttk.LabelFrame(outer,text='跳过格式 (全局输入过滤)'); skip_frame.pack(fill='x',pady=(0,6))
+		skip_frame=ttk.LabelFrame(outer,text='跳过格式'); skip_frame.pack(fill='x',pady=(0,6))
 		skip_enable_frame = ttk.Frame(skip_frame)
 		skip_enable_frame.pack(fill='x', pady=(4,2))
 		skip_enable_cb = ttk.Checkbutton(skip_enable_frame, text='启用跳过功能', variable=self.skip_formats_enabled, command=self._toggle_skip_formats)
 		skip_enable_cb.pack(side='left')
+		skip_convert_only_cb = ttk.Checkbutton(skip_enable_frame, text='仅格式转换跳过', variable=self.skip_convert_only)
+		skip_convert_only_cb.pack(side='left', padx=(20,0))
+		self.skip_convert_only_cb = skip_convert_only_cb
 		
 		# 格式选择区域 - 单行布局
 		formats_frame = ttk.Frame(skip_frame)
@@ -674,9 +678,22 @@ class ImageToolApp:
 			(cb_fmt,'目标格式'),(sc_q,'拖动调整质量'),(sp_q,'直接输入质量 1-100'),(cb_same,'同格式也重新编码'),(cb_png3,'PNG 高压缩'),
 			(ent_ico,'ICO 自定义尺寸: 逗号/空格分隔 例如 24,40'),
 		]
+		# 跳过格式提示
+		if hasattr(self, 'skip_formats_enabled'):
+			tips.append((skip_enable_cb,'启用格式跳过功能，基于文件实际格式而非扩展名'))
+		if hasattr(self, 'skip_convert_only_cb'):
+			tips.append((self.skip_convert_only_cb,'仅在格式转换阶段跳过，其他阶段(分类/去重/重命名)仍处理'))
+		if hasattr(self, 'skip_custom_entry'):
+			tips.append((self.skip_custom_entry,'自定义跳过格式，支持AVIF、HEIC等PIL支持的格式'))
 		# 补充 ico 勾选尺寸 tips
 		for c in self.ico_checks:
 			tips.append((c,'勾选加入该尺寸'))
+		# 补充跳过格式复选框 tips
+		if hasattr(self, 'skip_format_checkboxes'):
+			format_names = ['JPEG', 'PNG', 'WebP', 'GIF', 'BMP', 'TIFF', 'ICO']
+			for i, cb in enumerate(self.skip_format_checkboxes):
+				if i < len(format_names):
+					tips.append((cb, f'跳过{format_names[i]}格式的图片文件'))
 		# 继续追加其余
 		more_tips=[
 			(self.ico_keep_cb,'仅输出原图尺寸 (忽略其它选择)'),
@@ -731,6 +748,73 @@ class ImageToolApp:
 			cb.config(state='normal' if enabled else 'disabled')
 		if hasattr(self, 'skip_custom_entry'):
 			self.skip_custom_entry.config(state='normal' if enabled else 'disabled')
+		if hasattr(self, 'skip_convert_only_cb'):
+			self.skip_convert_only_cb.config(state='normal' if enabled else 'disabled')
+
+	def _get_skip_formats(self, for_convert_only=False):
+		"""获取要跳过的格式集合
+		for_convert_only: 是否仅用于格式转换阶段的检查
+		"""
+		if not self.skip_formats_enabled.get():
+			return set()
+		
+		# 如果设置了"仅格式转换跳过"，但当前不是转换阶段，则返回空集合
+		if self.skip_convert_only.get() and not for_convert_only:
+			return set()
+		
+		skip_formats = set()
+		format_map = {
+			'skip_jpeg': 'JPEG',
+			'skip_png': 'PNG', 
+			'skip_webp': 'WEBP',
+			'skip_gif': 'GIF',
+			'skip_bmp': 'BMP',
+			'skip_tiff': 'TIFF',
+			'skip_ico': 'ICO'
+		}
+		for attr_name, format_name in format_map.items():
+			if hasattr(self, attr_name) and getattr(self, attr_name).get():
+				skip_formats.add(format_name)
+		
+		# 处理自定义格式
+		custom_formats = self.skip_custom_var.get().strip()
+		if custom_formats:
+			# 支持空格、逗号、分号分隔
+			for fmt in custom_formats.replace(',', ' ').replace(';', ' ').replace('；', ' ').split():
+				if fmt:
+					skip_formats.add(fmt.upper())
+		
+		return skip_formats
+
+	def _copy_file_without_convert(self, src_file):
+		"""将跳过转换的文件直接复制到输出目录"""
+		try:
+			self._ensure_cache_dir()
+			out_dir = (self.cache_final_dir or self.cache_dir)
+			
+			# 保持相对路径结构
+			if hasattr(self, 'cache_dir') and self.cache_dir:
+				rel_path = os.path.relpath(src_file, self.cache_dir)
+				if rel_path.startswith('..'):
+					# 如果文件不在缓存目录下，使用文件名
+					dst_path = os.path.join(out_dir, os.path.basename(src_file))
+				else:
+					dst_path = os.path.join(out_dir, rel_path)
+			else:
+				dst_path = os.path.join(out_dir, os.path.basename(src_file))
+			
+			# 确保目标目录存在
+			os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+			
+			# 复制文件
+			if dst_path != src_file:
+				shutil.copy2(src_file, dst_path)
+			
+			# 记录日志
+			self.q.put(f'LOG\tCONVERT\t{src_file}\t{dst_path}\t跳过转换')
+			
+		except Exception as e:
+			self.q.put(f'LOG\tCONVERT\t{src_file}\t\t跳过转换失败:{e}')
 
 	def _start(self, dry_run:bool=False):
 		if self.worker and self.worker.is_alive():
@@ -1087,29 +1171,8 @@ class ImageToolApp:
 		image_files = []
 		non_image_files = []
 		
-		# 获取要跳过的格式集合
-		skip_formats = set()
-		if self.skip_formats_enabled.get():
-			format_map = {
-				'skip_jpeg': 'JPEG',
-				'skip_png': 'PNG', 
-				'skip_webp': 'WEBP',
-				'skip_gif': 'GIF',
-				'skip_bmp': 'BMP',
-				'skip_tiff': 'TIFF',
-				'skip_ico': 'ICO'
-			}
-			for attr_name, format_name in format_map.items():
-				if hasattr(self, attr_name) and getattr(self, attr_name).get():
-					skip_formats.add(format_name)
-			
-			# 处理自定义格式
-			custom_formats = self.skip_custom_var.get().strip()
-			if custom_formats:
-				# 支持空格、逗号、分号分隔
-				for fmt in custom_formats.replace(',', ' ').replace(';', ' ').replace('；', ' ').split():
-					if fmt:
-						skip_formats.add(fmt.upper())
+		# 获取要跳过的格式集合 (仅非转换阶段时应用全局跳过)
+		skip_formats = self._get_skip_formats(for_convert_only=False)
 		
 		try:
 			# 使用更新后的 iter_images 函数
@@ -1874,6 +1937,30 @@ class ImageToolApp:
 		process_same=self.process_same_var.get(); quality=self.quality_var.get(); png3=self.png3_var.get()
 		workers=max(1,self.workers_var.get())
 		real_out=self.out_var.get().strip() or self.in_var.get().strip()
+		
+		# 应用格式转换阶段的跳过设置
+		skip_formats = self._get_skip_formats(for_convert_only=True)
+		if skip_formats:
+			filtered_files = []
+			skipped_count = 0
+			for f in files:
+				try:
+					with Image.open(f) as img:
+						file_format = img.format
+						if file_format and file_format.upper() in skip_formats:
+							skipped_count += 1
+							# 跳过的文件直接复制到输出目录，不进行转换
+							self._copy_file_without_convert(f)
+							continue
+				except (IOError, OSError):
+					# 无法读取的文件继续处理
+					pass
+				filtered_files.append(f)
+			
+			if skipped_count > 0:
+				print(f"格式转换阶段跳过了 {skipped_count} 个文件")
+			files = filtered_files
+		
 		# 确保缓存目录已初始化，统一使用缓存目录进行中间处理
 		self._ensure_cache_dir()
 		out_dir = (self.cache_final_dir or self.cache_dir)
