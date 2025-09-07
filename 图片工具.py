@@ -375,10 +375,10 @@ class ImageToolApp:
 		btn_open_out=ttk.Button(io,text='打开',command=self._open_last_out,width=6); btn_open_out.grid(row=0,column=8,padx=(4,0))
 		
 		# 跳过格式设置 (全局输入过滤)
-		skip_frame=ttk.LabelFrame(outer,text='跳过(过滤)功能'); skip_frame.pack(fill='x',pady=(0,6))
+		skip_frame=ttk.LabelFrame(outer,text='跳过格式'); skip_frame.pack(fill='x',pady=(0,6))
 		skip_enable_frame = ttk.Frame(skip_frame)
 		skip_enable_frame.pack(fill='x', pady=(4,2))
-		skip_enable_cb = ttk.Checkbutton(skip_enable_frame, text='启用跳过(过滤)功能', variable=self.skip_formats_enabled, command=self._toggle_skip_formats)
+		skip_enable_cb = ttk.Checkbutton(skip_enable_frame, text='启用跳过功能', variable=self.skip_formats_enabled, command=self._toggle_skip_formats)
 		skip_enable_cb.pack(side='left')
 		skip_convert_only_cb = ttk.Checkbutton(skip_enable_frame, text='仅格式转换跳过', variable=self.skip_convert_only)
 		skip_convert_only_cb.pack(side='left', padx=(20,0))
@@ -2132,21 +2132,9 @@ class ImageToolApp:
 						file_format = img.format
 						if file_format and file_format.upper() in skip_formats:
 							skipped_count += 1
-							# 在预览模式下，跳过的文件直接复制到缓存目录不进行转换
-							# 在正常模式下，如果只启用了"仅格式转换跳过"且启用了重命名，需要将跳过的文件也加入处理流程
-							if self.dry_run:
-								copied_path = self._copy_file_without_convert(f)
-								skipped_files.append(copied_path if copied_path else f)
-							else:
-								# 正常模式下，如果启用了重命名，跳过的文件仍需参与重命名阶段
-								if self.enable_rename.get() and self.skip_convert_only.get():
-									# 将跳过的文件复制到缓存目录，以便后续重命名处理
-									copied_path = self._copy_file_without_convert(f)
-									skipped_files.append(copied_path if copied_path else f)
-								else:
-									# 如果没有启用重命名，直接复制到输出目录
-									copied_path = self._copy_file_without_convert(f)
-									skipped_files.append(copied_path if copied_path else f)
+							# 跳过的文件直接复制到输出目录，不进行转换
+							copied_path = self._copy_file_without_convert(f)
+							skipped_files.append(copied_path if copied_path else f)
 							continue
 				except (IOError, OSError):
 					# 无法读取的文件继续处理
@@ -2216,26 +2204,9 @@ class ImageToolApp:
 			with lock:
 				if ok:
 					self.q.put(f'LOG\tCONVERT\t{f}\t{dest}\t转换')
-					results[i] = dest
 				else:
 					self.q.put(f'LOG\tCONVERT\t{f}\t{dest}\t转换失败:{msg}')
-					# 转换失败时的处理
-					if not preview and self.enable_rename.get():
-						# 正常模式且启用重命名时，复制原文件到缓存目录以便重命名
-						try:
-							rel_dir=os.path.relpath(os.path.dirname(f), class_root)
-							if rel_dir=='.': rel_dir=''
-							dst_dir=os.path.join(out_dir, rel_dir)
-							os.makedirs(dst_dir, exist_ok=True)
-							failed_dest=os.path.join(dst_dir, os.path.basename(f))
-							if not os.path.exists(failed_dest):
-								shutil.copy2(f, failed_dest)
-							results[i] = failed_dest
-						except Exception as copy_e:
-							self.q.put(f'LOG\tCONVERT\t{f}\t\t复制失败文件到缓存失败: {copy_e}')
-							results[i] = f  # 失败的文件传递原路径到下一阶段
-					else:
-						results[i] = f  # 失败的文件传递原路径到下一阶段
+				results[i]= dest if ok else f  # 失败的文件传递原路径到下一阶段
 				done+=1; self.q.put(f'PROG {done} {total}')
 		if workers>1 and len(files)>1:
 			with ThreadPoolExecutor(max_workers=workers) as ex:
