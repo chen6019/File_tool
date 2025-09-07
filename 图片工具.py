@@ -424,12 +424,19 @@ class ImageToolApp:
 		self.enable_rename=tk.BooleanVar(value=False)
 		# 比例分类配置 (新独立区域)
 		self.classify_ratio_var=tk.BooleanVar(value=False)
+		# 形状分类配置
+		self.classify_shape_var=tk.BooleanVar(value=False)
+		self.shape_tolerance_var=tk.DoubleVar(value=0.05)  # 方形容差，默认5%
+		self.shape_square_name=tk.StringVar(value='zfx')  # 方形文件夹名
+		self.shape_horizontal_name=tk.StringVar(value='hp')  # 横向文件夹名
+		self.shape_vertical_name=tk.StringVar(value='sp')  # 纵向文件夹名
 		# 比例分类默认容差 15%
 		self.ratio_tol_var=tk.DoubleVar(value=0.15)
 		# 保留常用预设: 16:9,3:2,4:3,1:1,21:9
 		self.ratio_custom_var=tk.StringVar(value='16:9,3:2,4:3,1:1,21:9')
 		self.ratio_snap_var=tk.BooleanVar(value=False)  # 不匹配是否取最近
-		cb_classify=ttk.Checkbutton(opts,text='分类',variable=self.classify_ratio_var); cb_classify.pack(side='left',padx=2)
+		cb_classify=ttk.Checkbutton(opts,text='比例分类',variable=self.classify_ratio_var); cb_classify.pack(side='left',padx=2)
+		cb_shape=ttk.Checkbutton(opts,text='形状分类',variable=self.classify_shape_var); cb_shape.pack(side='left',padx=2)
 		cb_convert=ttk.Checkbutton(opts,text='转换',variable=self.enable_convert); cb_convert.pack(side='left',padx=2)
 		cb_dedupe=ttk.Checkbutton(opts,text='去重',variable=self.enable_dedupe); cb_dedupe.pack(side='left',padx=2)
 		cb_rename=ttk.Checkbutton(opts,text='重命名',variable=self.enable_rename); cb_rename.pack(side='left',padx=2)
@@ -487,6 +494,57 @@ class ImageToolApp:
 		btn_clear=ttk.Button(preset_frame,text='清空',width=6,command=lambda: self.ratio_custom_var.set(''))
 		btn_clear.pack(side='left',padx=(8,0))
 		self._ratio_btn_clear=btn_clear
+		
+		# 形状分类 (新区域)
+		ttk.Separator(outer,orient='horizontal').pack(fill='x',pady=(0,4))
+		shape_frame=ttk.LabelFrame(outer,text='形状分类'); shape_frame.pack(fill='x',pady=(0,10))
+		self.frame_shape=shape_frame
+		shape_frame.columnconfigure(5,weight=1)
+		
+		# 第一行：容差设置
+		ttk.Label(shape_frame,text='容差').grid(row=0,column=0,sticky='e')
+		sp_shape_tol=ttk.Spinbox(shape_frame,from_=0.01,to=0.5,increment=0.01,textvariable=self.shape_tolerance_var,width=8,format='%.2f')
+		sp_shape_tol.grid(row=0,column=1,sticky='w',padx=(4,12))
+		ttk.Label(shape_frame,text='(方形判定容差，默认0.05=±5%)').grid(row=0,column=2,sticky='w',columnspan=3)
+		
+		# 第二行：文件夹名称设置
+		ttk.Label(shape_frame,text='文件夹').grid(row=1,column=0,sticky='e',pady=(4,0))
+		
+		folder_settings_frame = ttk.Frame(shape_frame)
+		folder_settings_frame.grid(row=1,column=1,columnspan=4,sticky='we',pady=(4,2))
+		
+		ttk.Label(folder_settings_frame,text='方形:').pack(side='left')
+		ent_square=ttk.Entry(folder_settings_frame,textvariable=self.shape_square_name,width=8)
+		ent_square.pack(side='left',padx=(2,8))
+		
+		ttk.Label(folder_settings_frame,text='横向:').pack(side='left')
+		ent_horizontal=ttk.Entry(folder_settings_frame,textvariable=self.shape_horizontal_name,width=8)
+		ent_horizontal.pack(side='left',padx=(2,8))
+		
+		ttk.Label(folder_settings_frame,text='纵向:').pack(side='left')
+		ent_vertical=ttk.Entry(folder_settings_frame,textvariable=self.shape_vertical_name,width=8)
+		ent_vertical.pack(side='left',padx=(2,8))
+		
+		# 重置按钮
+		btn_reset_shape=ttk.Button(folder_settings_frame,text='重置',width=6,
+			command=lambda: [self.shape_square_name.set('zfx'),
+							self.shape_horizontal_name.set('hp'),
+							self.shape_vertical_name.set('sp'),
+							self.shape_tolerance_var.set(0.05)])
+		btn_reset_shape.pack(side='left',padx=(8,0))
+		
+		# 保存引用供后续状态控制
+		self._shape_sp_tol=sp_shape_tol
+		self._shape_ent_square=ent_square
+		self._shape_ent_horizontal=ent_horizontal
+		self._shape_ent_vertical=ent_vertical
+		self._shape_btn_reset=btn_reset_shape
+		
+		# # 形状分类说明
+		# shape_info_frame = ttk.Frame(shape_frame)
+		# shape_info_frame.grid(row=2,column=0,columnspan=5,sticky='w',pady=(4,8))
+		# ttk.Label(shape_info_frame, text='将图片按形状分类到不同文件夹，支持自定义文件夹名称', foreground='gray').pack(side='left')
+		
 		# 转换 (第二阶段)
 		ttk.Separator(outer,orient='horizontal').pack(fill='x',pady=(0,4))
 		convert=ttk.LabelFrame(outer,text='格式转换'); convert.pack(fill='x',pady=(0,10))
@@ -664,6 +722,7 @@ class ImageToolApp:
 		self.enable_rename.trace_add('write', lambda *a: self._update_states())
 		self.enable_dedupe.trace_add('write', lambda *a: self._update_states())
 		self.classify_ratio_var.trace_add('write', lambda *a: self._update_states())
+		self.classify_shape_var.trace_add('write', lambda *a: self._update_states())
 		self.dedup_action_var.trace_add('write', lambda *a: self._update_states())
 		self.fmt_var.trace_add('write', lambda *a: self._update_states())
 		# tooltips
@@ -707,6 +766,14 @@ class ImageToolApp:
 			if hasattr(self,'_ratio_sp_rt'): more_tips.append((self._ratio_sp_rt,'相对误差容差, 默认 0.15=±15%'))
 			if hasattr(self,'_ratio_ent'): more_tips.append((self._ratio_ent,'自定义列表, 支持 16:9 / 16x9 形式'))
 			# 顶部启用按钮为 cb_classify (在 opts), 这里不重复
+		# 形状分类提示
+		if hasattr(self,'frame_shape'):
+			more_tips.append((self.frame_shape,'按图片形状分类，支持自定义容差和文件夹名称，动图会额外添加AM前缀'))
+			if hasattr(self,'_shape_sp_tol'): more_tips.append((self._shape_sp_tol,'方形判定容差，默认0.05=±5%'))
+			if hasattr(self,'_shape_ent_square'): more_tips.append((self._shape_ent_square,'方形图片的文件夹名称'))
+			if hasattr(self,'_shape_ent_horizontal'): more_tips.append((self._shape_ent_horizontal,'横向图片的文件夹名称'))
+			if hasattr(self,'_shape_ent_vertical'): more_tips.append((self._shape_ent_vertical,'纵向图片的文件夹名称'))
+			if hasattr(self,'_shape_btn_reset'): more_tips.append((self._shape_btn_reset,'重置为默认设置'))
 		tips.extend(more_tips)
 		# 补充自动调整窗口提示
 		if 'cb_auto' in locals():
@@ -1375,6 +1442,10 @@ class ImageToolApp:
 			if not self.single_file_mode and self.classify_ratio_var.get():
 				files=self._ratio_classify_stage(files)
 			if self.stop_flag.is_set(): return
+			# 1.5 形状分类 (仅多文件; 单文件跳过)
+			if not self.single_file_mode and self.classify_shape_var.get():
+				files=self._shape_classify_stage(files)
+			if self.stop_flag.is_set(): return
 			# 2 转换 (保持结构) 返回最终文件列表
 			if self.enable_convert.get():
 				files=self._convert_stage_only(files)
@@ -1391,6 +1462,7 @@ class ImageToolApp:
 			# 4.5 如果没有启用任何处理功能，需要将文件复制到final目录
 			if not self.dry_run and not any([
 				not self.single_file_mode and self.classify_ratio_var.get(),
+				not self.single_file_mode and self.classify_shape_var.get(),
 				self.enable_convert.get(),
 				not self.single_file_mode and self.enable_dedupe.get(),
 				self.enable_rename.get()
@@ -1897,10 +1969,110 @@ class ImageToolApp:
 				if r: result.append(r)
 		return result
 
+	def _shape_classify_stage(self, file_list:list[str])->list[str]:
+		"""按形状分类: 横向 (宽>高)、纵向 (高>宽)、方形 (宽≈高)
+		返回新路径列表 (分类后路径)。"""
+		workers=max(1,self.workers_var.get())
+		result=[]
+		lock=threading.Lock(); done=0; total=len(file_list)
+		preview=self.dry_run
+		self.q.put(f'STATUS 形状分类中 共{total}')
+		
+		# 确保缓存目录已初始化
+		self._ensure_cache_dir()
+		base_out = (self.cache_final_dir or self.cache_dir)
+		
+		def classify_one(p):
+			nonlocal done
+			if self.stop_flag.is_set(): return None
+			try:
+				with Image.open(p) as im:
+					w, h = im.size
+				
+				# 判断形状 (使用自定义容差)
+				square_tolerance = self.shape_tolerance_var.get()
+				ratio = w / h if h > 0 else 1
+				
+				# 获取自定义文件夹名称
+				square_name = self.shape_square_name.get().strip() or 'zfx'
+				horizontal_name = self.shape_horizontal_name.get().strip() or 'hp'
+				vertical_name = self.shape_vertical_name.get().strip() or 'sp'
+				
+				if abs(ratio - 1) <= square_tolerance:
+					shape_label = square_name
+				elif ratio > 1:
+					shape_label = horizontal_name
+				else:
+					shape_label = vertical_name
+				
+				# 检测是否为动图
+				is_animated = self.is_animated_image(p)
+				
+				# 根据是否为动图确定最终分类
+				if is_animated:
+					# 动图进行二次分类：AM/形状分类
+					label = f'AM/{shape_label}'
+				else:
+					# 静态图片直接按形状分类
+					label = shape_label
+				
+				dir_shape = os.path.join(base_out, label)
+				if not os.path.isdir(dir_shape):
+					try: os.makedirs(dir_shape, exist_ok=True)
+					except Exception: pass
+				dest = os.path.join(dir_shape, os.path.basename(p))
+				if os.path.abspath(dest) == os.path.abspath(p):
+					with lock:
+						done += 1
+					return p
+				if os.path.exists(dest):
+					if not preview:
+						dest = next_non_conflict(dest)
+					else:
+						base_no, ext = os.path.splitext(dest); i = 1
+						alt = f"{base_no}_{i}{ext}"
+						while os.path.exists(alt):
+							i += 1; alt = f"{base_no}_{i}{ext}"
+						dest = alt
+				try:
+					# 统一使用复制到缓存目录，保持源文件不变
+					shutil.copy2(p, dest)
+					self.q.put(f'LOG\tCLASSIFY\t{p}\t{dest}\t形状分类->{label}')
+					res_path = dest
+				except Exception as e:
+					import traceback
+					error_detail = f"{str(e)} | Traceback: {traceback.format_exc().replace(chr(10), ' | ')}"
+					self.q.put(f'LOG\tCLASSIFY\t{p}\t{p}\t形状分类失败:{error_detail}')
+					res_path = p
+			except Exception as e:
+				import traceback
+				error_detail = f"{str(e)} | Traceback: {traceback.format_exc().replace(chr(10), ' | ')}"
+				self.q.put(f'LOG\tCLASSIFY\t{p}\t{p}\t形状分类失败:{error_detail}')
+				res_path = p
+			with lock:
+				done += 1
+				self.q.put(f'PROG {done} {total}')
+			return res_path
+		
+		if workers > 1:
+			with ThreadPoolExecutor(max_workers=workers) as ex:
+				for fut in as_completed([ex.submit(classify_one, p) for p in file_list]):
+					r = fut.result();
+					if r: result.append(r)
+		else:
+			for p in file_list:
+				r = classify_one(p); 
+				if r: result.append(r)
+		return result
+
 	def _calc_preview_signature(self):
 		parts=[]
 		def add(k,v): parts.append(f"{k}={v}")
 		add('classify', int(self.classify_ratio_var.get()))
+		add('classify_shape', int(self.classify_shape_var.get()))
+		if self.classify_shape_var.get():
+			add('shape_tol', self.shape_tolerance_var.get())
+			add('shape_names', f"{self.shape_square_name.get()},{self.shape_horizontal_name.get()},{self.shape_vertical_name.get()}")
 		add('convert', int(self.enable_convert.get()))
 		add('dedupe', int(self.enable_dedupe.get()))
 		add('rename', int(self.enable_rename.get()))
@@ -2615,6 +2787,18 @@ class ImageToolApp:
 				if hasattr(self,'_ratio_btn_clear') and self._ratio_btn_clear:
 					try: self._ratio_btn_clear.configure(state='normal' if enabled else 'disabled')
 					except Exception: pass
+		except Exception:
+			pass
+		# 形状分类区
+		try:
+			if hasattr(self,'frame_shape') and self.frame_shape:
+				enabled=self.classify_shape_var.get()
+				# 形状分类区域的基础控件启用/禁用
+				for widget in (getattr(self,'_shape_sp_tol',None), getattr(self,'_shape_ent_square',None), getattr(self,'_shape_ent_horizontal',None), getattr(self,'_shape_ent_vertical',None), getattr(self,'_shape_btn_reset',None)):
+					if widget:
+						state='normal' if enabled else 'disabled'
+						try: widget.configure(state=state)
+						except Exception: pass
 		except Exception:
 			pass
 		if hasattr(self,'frame_dedupe') and self.frame_dedupe:
