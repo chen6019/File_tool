@@ -762,10 +762,15 @@ class ImageToolApp:
 				self._rename_stage_only(files)
 			if self.stop_flag.is_set(): return
 			# 5 正常模式：将缓存中的最终结果复制到真正的输出目录
+			remove_info = ""
 			if not self.dry_run:
-				self._finalize_to_output()
+				remove_info = self._finalize_to_output()
 			
-			self.q.put('STATUS 预览完成' if self.dry_run else 'STATUS 完成')
+			# 合并完成状态信息
+			if self.dry_run:
+				self.q.put('STATUS 预览完成')
+			else:
+				self.q.put(f'STATUS 完成{remove_info}')
 			# 生成预览签名
 			if self.dry_run and not self.stop_flag.is_set():
 				self._last_preview_signature=self._calc_preview_signature()
@@ -1493,8 +1498,15 @@ class ImageToolApp:
 			# 内部状态信息，不显示在日志框中
 			
 			# 最后一步：如果启用删源功能，删除输入文件夹中的原始文件
+			remove_info = ""
 			if self.global_remove_src.get():
-				self._remove_source_files()
+				deleted_count, failed_count = self._remove_source_files()
+				if deleted_count > 0 or failed_count > 0:
+					remove_info = f"，删源：删除 {deleted_count} 个文件，失败 {failed_count} 个"
+				else:
+					remove_info = "，无文件需要删除"
+			
+			return remove_info
 			
 		except Exception as e:
 			import traceback
@@ -1502,12 +1514,12 @@ class ImageToolApp:
 			self.q.put(f'LOG\tFINALIZE\t\t\t失败: {error_detail}')
 
 	def _remove_source_files(self):
-		"""删除输入文件夹中已成功处理的原始文件"""
+		"""删除输入文件夹中已成功处理的原始文件，返回删除统计"""
 		try:
 			input_dir = self.in_var.get().strip()
 			if not input_dir or not os.path.exists(input_dir):
 				self.q.put(f'LOG\tREMOVE_SRC\t\t\t输入目录无效或不存在')
-				return
+				return 0, 0
 			
 			# 获取所有原始文件路径（从映射表中）
 			original_files = set(self.cache_to_original_map.values())
@@ -1540,15 +1552,13 @@ class ImageToolApp:
 					failed_count += 1
 					self.q.put(f'LOG\tREMOVE_SRC\t{source_file}\t\t删除失败: {e}')
 			
-			if deleted_count > 0 or failed_count > 0:
-				self.q.put(f'LOG\tREMOVE_SRC\t\t\t完成，删除 {deleted_count} 个文件，失败 {failed_count} 个')
-			else:
-				self.q.put(f'LOG\tREMOVE_SRC\t\t\t无文件需要删除')
+			return deleted_count, failed_count
 			
 		except Exception as e:
 			import traceback
 			error_detail = f"{str(e)} | Traceback: {traceback.format_exc().replace(chr(10), ' | ')}"
 			self.q.put(f'LOG\tREMOVE_SRC\t\t\t失败: {error_detail}')
+			return 0, 0
 
 	# (删除重复的旧 _ratio_classify_stage 定义)
 
