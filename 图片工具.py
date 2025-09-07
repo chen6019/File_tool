@@ -100,7 +100,7 @@ def safe_delete(path:str):
 	except Exception as e:
 		return False,f'删失败:{e}'
 
-def is_animated_image(self, path: str) -> bool:
+	def is_animated_image(self, path: str) -> bool:
 		"""检测图片是否为动图 (GIF, WebP, APNG)"""
 		try:
 			with Image.open(path) as im:
