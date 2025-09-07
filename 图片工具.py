@@ -813,8 +813,11 @@ class ImageToolApp:
 			# 记录日志
 			self.q.put(f'LOG\tCONVERT\t{src_file}\t{dst_path}\t跳过转换')
 			
+			return dst_path  # 返回复制后的文件路径
+			
 		except Exception as e:
 			self.q.put(f'LOG\tCONVERT\t{src_file}\t\t跳过转换失败:{e}')
+			return None
 
 	def _start(self, dry_run:bool=False):
 		if self.worker and self.worker.is_alive():
@@ -1940,6 +1943,7 @@ class ImageToolApp:
 		
 		# 应用格式转换阶段的跳过设置
 		skip_formats = self._get_skip_formats(for_convert_only=True)
+		skipped_files = []  # 记录跳过的文件，用于后续阶段处理
 		if skip_formats:
 			filtered_files = []
 			skipped_count = 0
@@ -1950,7 +1954,8 @@ class ImageToolApp:
 						if file_format and file_format.upper() in skip_formats:
 							skipped_count += 1
 							# 跳过的文件直接复制到输出目录，不进行转换
-							self._copy_file_without_convert(f)
+							copied_path = self._copy_file_without_convert(f)
+							skipped_files.append(copied_path if copied_path else f)
 							continue
 				except (IOError, OSError):
 					# 无法读取的文件继续处理
@@ -2022,7 +2027,7 @@ class ImageToolApp:
 					self.q.put(f'LOG\tCONVERT\t{f}\t{dest}\t转换')
 				else:
 					self.q.put(f'LOG\tCONVERT\t{f}\t{dest}\t转换失败:{msg}')
-				results[i]= dest if ok else None  # 失败的文件不传递到下一阶段
+				results[i]= dest if ok else f  # 失败的文件传递原路径到下一阶段
 				done+=1; self.q.put(f'PROG {done} {total}')
 		if workers>1 and len(files)>1:
 			with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -2032,7 +2037,11 @@ class ImageToolApp:
 		else:
 			for i,f in enumerate(files):
 				do_one(i,f)
-		return [r for r in results if r]
+		
+		# 合并转换结果和跳过的文件
+		converted_files = [r for r in results if r]
+		all_files = converted_files + skipped_files
+		return all_files
 
 	def _rename_stage_only(self, files:list[str]):
 		pattern=self.pattern_var.get().strip()
