@@ -523,8 +523,10 @@ class ImageToolApp:
 		# 记录基础窗口最小尺寸
 		try:
 			self.root.update_idletasks(); self._base_win_width=self.root.winfo_width(); self._base_win_height=self.root.winfo_height()
+			self._min_window_width = self._base_win_width  # 设置最小窗口宽度
 		except Exception:
 			self._base_win_width=900; self._base_win_height=600
+			self._min_window_width = 900  # 默认最小宽度
 		# 捕获日志区初始高度用于锁定
 		self._log_fixed_height=None
 		self.root.after(400,self._capture_log_height)
@@ -690,16 +692,6 @@ class ImageToolApp:
 			# 1 分类 (仅多文件; 单文件跳过) 提前, 影响后续路径结构
 			if not self.single_file_mode and self.classify_ratio_var.get():
 				files=self._ratio_classify_stage(files)
-				# 预览时把分类结果同步到 _final，便于后续快速提交（若没有后续阶段）
-				if self.dry_run and self.cache_final_dir:
-					for p in files:
-						if p.startswith(self.cache_dir):
-							rel=os.path.relpath(p,self.cache_dir)
-							target=os.path.join(self.cache_final_dir, rel)
-							os.makedirs(os.path.dirname(target),exist_ok=True)
-							if not os.path.exists(target):
-								try: shutil.copy2(p,target)
-								except Exception: pass
 			if self.stop_flag.is_set(): return
 			# 2 转换 (保持结构) 返回最终文件列表
 			if self.enable_convert.get():
@@ -900,7 +892,12 @@ class ImageToolApp:
 					name=name_raw.replace('{name}',orig_stem).replace('{ext}',src_ext).replace('{fmt}',tgt_fmt)
 					if '.' not in os.path.basename(name): name+=f'.{tgt_fmt}'
 					final_basename=os.path.basename(name)
-					final_path=os.path.join(out_dir,final_basename)
+					
+					# 重命名应该在文件当前所在目录进行，而不是移动到其他地方
+					# 删源选项只控制是否删除输入文件夹的原始文件，不影响输出文件夹的处理
+					current_dir = os.path.dirname(f)
+					final_path = os.path.join(current_dir, final_basename)
+					
 					if os.path.exists(final_path):
 						if overwrite=='skip':
 							self.q.put(f'LOG\tCONVERT\t{f}\t{final_path}\t跳过(存在)'); local_idx+=step; continue
@@ -909,14 +906,15 @@ class ImageToolApp:
 					will_rename = (final_basename != default_basename)
 					if need_convert:
 						convert_basename = default_basename if will_rename else final_basename
-						convert_path = os.path.join(out_dir, convert_basename)
+						convert_path = os.path.join(current_dir, convert_basename)
 						if will_rename and os.path.exists(convert_path) and convert_path!=final_path:
 							convert_path = next_non_conflict(convert_path)
 					else:
 						if will_rename:
 							convert_basename = default_basename
-							convert_path = os.path.join(out_dir, convert_basename)
+							convert_path = os.path.join(current_dir, convert_basename)
 							if os.path.exists(convert_path) and convert_path!=final_path:
+								convert_path = next_non_conflict(convert_path)
 								convert_path = next_non_conflict(convert_path)
 						else:
 							convert_basename = final_basename
@@ -962,7 +960,8 @@ class ImageToolApp:
 				else:
 					convert_path = os.path.join(self.cache_dir, convert_basename)
 				if will_rename:
-					final_path = os.path.join(self.cache_dir, final_basename)
+					# 重命名应该在同一个目录内进行，不创建_final文件夹
+					final_path = os.path.join(os.path.dirname(convert_path), final_basename)
 			else:
 				os.makedirs(os.path.dirname(convert_path),exist_ok=True)
 			msg_convert=''; ok_convert=True
@@ -1028,9 +1027,11 @@ class ImageToolApp:
 				if self.dry_run:
 					try:
 						if convert_path!=final_path:
-							# 拷贝中间文件到最终缓存名
+							# 确保目标目录存在
+							os.makedirs(os.path.dirname(final_path), exist_ok=True)
 							if os.path.exists(convert_path):
-								shutil.copy2(convert_path, final_path)
+								# 在同一目录内重命名，删除原文件
+								os.rename(convert_path, final_path)
 						ok_rename=True; msg_rename='命名(预览)'
 					except Exception as e:
 						ok_rename=False; msg_rename=f'命名失败(预览):{e}'
@@ -1366,6 +1367,7 @@ class ImageToolApp:
 		os.makedirs(target_dir, exist_ok=True)
 		dest=os.path.join(target_dir, final_name)
 		if os.path.abspath(dest)==os.path.abspath(f):
+			self.q.put(f'LOG\tRENAME\t{f}\t{dest}\t跳过(路径相同)')
 			return idx + step
 		if os.path.exists(dest):
 			if overwrite=='skip':
@@ -1382,10 +1384,8 @@ class ImageToolApp:
 				if remove_src and os.path.exists(f):
 					self._simulate_delete(f)
 			else:
-				if remove_src:
-					shutil.move(f,dest)
-				else:
-					shutil.copy2(f,dest)
+				# 正常模式下，重命名操作总是移动文件（删除源文件），这是重命名的预期行为
+				shutil.move(f,dest)
 			self.q.put(f'LOG\tRENAME\t{f}\t{dest}\t重命名')
 		except Exception as e:
 			import traceback
@@ -1615,12 +1615,17 @@ class ImageToolApp:
 		desired_h=preview_top+img_h+extra_h
 		sh=self.root.winfo_screenheight(); margin=50
 		desired_h=min(desired_h, sh-margin)
+		
+		# 确保宽度不会自动调整：使用窗口的当前宽度或最小宽度
 		cur_w=self.root.winfo_width()  # 保持当前宽度
+		min_w = getattr(self, '_min_window_width', 800)  # 最小宽度800像素
+		final_w = max(cur_w, min_w)  # 确保不会变得太小
+		
 		last=self._last_auto_size
 		# last[0] 存旧宽度, last[1] 旧高度
 		if not (last and abs(last[1]-desired_h)<10):
-			self.root.geometry(f"{int(cur_w)}x{int(desired_h)}")
-			self._last_auto_size=(cur_w,desired_h)
+			self.root.geometry(f"{int(final_w)}x{int(desired_h)}")
+			self._last_auto_size=(final_w,desired_h)
 		# 固定日志区高度
 		if self._log_fixed_height and hasattr(self,'paned') and hasattr(self,'upper_frame'):
 			try:
@@ -1726,7 +1731,7 @@ class ImageToolApp:
 				base_no,ext=os.path.splitext(base); i=1
 				while os.path.exists(target):
 					target=os.path.join(self.cache_trash_dir, f"{base_no}_{i}{ext}"); i+=1
-			shutil.copy2(path, target)
+			shutil.move(path, target)
 		except Exception:
 			pass
 
