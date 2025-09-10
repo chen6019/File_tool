@@ -1,64 +1,82 @@
-"""图片工具
+"""图片工具 - 多功能图片处理工具
+支持格式转换、重复图片检测、分类整理、批量重命名等功能
 """
 from __future__ import annotations
-import os, sys, threading, queue, shutil, subprocess, re, hashlib, time
+import os
+import sys
+import threading
+import queue
+import shutil
+import subprocess
+import re
+import hashlib
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import List, Iterable
 
 try:
 	import tkinter as tk
-	from tkinter import ttk, filedialog, messagebox
+	from tkinter import ttk, filedialog, messagebox, font
 except Exception:  # pragma: no cover
-	tk=None  # type: ignore
+	tk = None  # type: ignore
 
 try:
 	from PIL import Image, ImageSequence, ImageFile, ImageTk  # type: ignore
 except Exception:  # pragma: no cover
-	Image=None  # type: ignore
-	ImageFile=None  # type: ignore
+	Image = None  # type: ignore
+	ImageFile = None  # type: ignore
 
 # Windows 回收站支持 (可选)
 try:
 	from send2trash import send2trash  # type: ignore
 except Exception:  # pragma: no cover
-	send2trash=None  # type: ignore
+	send2trash = None  # type: ignore
 
+# 配置和常量
 if ImageFile:
-	ImageFile.LOAD_TRUNCATED_IMAGES = True  # 更宽容
-SUPPORTED_EXT={'.jpg','.jpeg','.png','.webp','.gif','.bmp','.tiff','.ico'}
+	ImageFile.LOAD_TRUNCATED_IMAGES = True  # 更宽容处理截断图片
 
-# 显示 -> 内部代码 映射
-KEEP_MAP={
-	'首个':'first',
-	'最大分辨率':'largest',
-	'最大文件':'largest-file',
-	'最新':'newest',
-	'最旧':'oldest',
-}
-ACTION_MAP={
-	'仅列出':'list',
-	'删除重复':'delete',
-	'移动重复':'move',
-}
-FMT_MAP={
-	'JPG(JPEG)':'jpg',
-	'PNG':'png',
-	'WebP':'webp',
-	'ICO图标':'ico',
-}
-OVERWRITE_MAP={
-	'覆盖原有':'overwrite',
-	'跳过已存在':'skip',
-	'自动改名':'rename',
+SUPPORTED_EXT = {'.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.tiff', '.ico'}
+
+# UI字体配置
+DEFAULT_FONT_SIZE = 9
+DEFAULT_FONT_FAMILY = "Microsoft YaHei UI"  # Windows 默认字体
+
+# 显示名称与内部代码映射
+KEEP_MAP = {
+	'首个': 'first',
+	'最大分辨率': 'largest',
+	'最大文件': 'largest-file',
+	'最新': 'newest',
+	'最旧': 'oldest',
 }
 
-# 日志阶段到中文显示
-STAGE_MAP_DISPLAY={
-	'DEDUP':'去重',
-	'CONVERT':'转换',
-	'RENAME':'重命名',
-	'CLASSIFY':'分类',
+ACTION_MAP = {
+	'仅列出': 'list',
+	'删除重复': 'delete',
+	'移动重复': 'move',
+}
+
+FMT_MAP = {
+	'JPG(JPEG)': 'jpg',
+	'PNG': 'png',
+	'WebP': 'webp',
+	'ICO图标': 'ico',
+}
+
+OVERWRITE_MAP = {
+	'覆盖原有': 'overwrite',
+	'跳过已存在': 'skip',
+	'自动改名': 'rename',
+}
+
+# 日志阶段显示映射
+STAGE_MAP_DISPLAY = {
+	'DEDUP': '去重',
+	'CONVERT': '转换',
+	'RENAME': '重命名',
+	'CLASSIFY': '分类',
 }
 
 def _rev_map(mp:dict):
@@ -317,21 +335,77 @@ class PreviewThread(threading.Thread):
 
 class ImageToolApp:
 	def __init__(self, root):
-		self.root=root; root.title('图片工具')
-		self.q=queue.Queue(); self.worker=None; self.stop_flag=threading.Event()
-		self._all_files=[]
-		self._preview_ref=None
-		self._tooltip=None; self._tooltip_after=None
-		self.frame_convert=None; self.frame_rename=None
-		self.move_dir_entry=None; self.move_dir_btn=None
-		self.write_to_output=True
-		self.single_file_mode=False
-		self._ratio_map={}  # 路径 -> 比例标签
-		# 回收站逻辑自动化 (send2trash 可用即使用)
-		self.trash_cb=None  # 兼容旧引用
-		self.last_out_dir=None
-		self.cache_dir=None  # 预览缓存文件夹
-		# 跳过格式的变量
+		self.root = root
+		self._setup_ui_config()
+		
+		# 基础属性初始化
+		self.q = queue.Queue()
+		self.worker = None
+		self.stop_flag = threading.Event()
+		self._all_files = []
+		self._preview_ref = None
+		self._tooltip = None
+		self._tooltip_after = None
+		self.frame_convert = None
+		self.frame_rename = None
+		self.move_dir_entry = None
+		self.move_dir_btn = None
+		self.write_to_output = True
+		self.single_file_mode = False
+		self._ratio_map = {}  # 路径 -> 比例标签
+		
+		# 缓存和输出相关
+		self.last_out_dir = None
+		self.cache_dir = None  # 预览缓存文件夹
+		self.cache_trash_dir = None  # 预览模拟回收站目录
+		self.cache_final_dir = None  # 预览最终结果目录 (_final)
+		self.processed_source_files = set()  # 记录已成功处理的源文件路径
+		self.cache_to_original_map = {}  # 缓存文件到原始文件的映射
+		self._last_preview_signature = None
+		self._last_preview_files = None  # list of (path,mtime,size)
+		
+		# 跳过格式配置
+		self._init_skip_format_vars()
+		
+		# 初始化预览线程
+		self.preview_thread = PreviewThread(self)
+		self.preview_thread.start()
+		
+		# 构建UI
+		self._build()
+		self.root.after(200, self._drain)
+		
+		# 退出时清理缓存
+		self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+	def _setup_ui_config(self):
+		"""配置UI显示设置，包括DPI感知和字体"""
+		self.root.title('图片工具')
+		
+		# Windows DPI感知设置
+		try:
+			if sys.platform.startswith('win'):
+				import ctypes
+				ctypes.windll.shcore.SetProcessDpiAwareness(1)  # 启用DPI感知
+		except Exception:
+			pass  # 忽略DPI设置失败
+		
+		# 字体配置
+		try:
+			self.default_font = font.nametofont("TkDefaultFont")
+			self.default_font.configure(family=DEFAULT_FONT_FAMILY, size=DEFAULT_FONT_SIZE)
+			
+			# 配置默认字体
+			self.root.option_add("*Font", self.default_font)
+		except Exception:
+			pass  # 字体配置失败时使用系统默认
+		
+		# 窗口初始大小
+		self.root.geometry("900x700")
+		self.root.minsize(800, 600)
+
+	def _init_skip_format_vars(self):
+		"""初始化跳过格式相关变量"""
 		self.skip_formats_enabled = tk.BooleanVar()  # 是否启用跳过功能
 		self.skip_convert_only = tk.BooleanVar()  # 是否仅在格式转换时跳过
 		self.skip_jpeg = tk.BooleanVar()
@@ -342,126 +416,197 @@ class ImageToolApp:
 		self.skip_tiff = tk.BooleanVar()
 		self.skip_ico = tk.BooleanVar()
 		self.skip_custom_var = tk.StringVar()  # 自定义跳过格式输入框
-		
-		# 初始化预览线程
-		self.preview_thread = PreviewThread(self)
-		self.preview_thread.start()
-		self._build()
-		self.root.after(200,self._drain)
-		# 退出时清理缓存
-		self.root.protocol("WM_DELETE_WINDOW", self._on_close)
-		self.cache_trash_dir=None  # 预览模拟回收站目录
-		self.cache_final_dir=None  # 预览最终结果目录 (_final)
-		self.processed_source_files = set()  # 记录已成功处理的源文件路径
-		self.cache_to_original_map = {}  # 缓存文件到原始文件的映射
-		self._last_preview_signature=None
-		self._last_preview_files=None  # list of (path,mtime,size)
 
-	# ---------------- UI ----------------
+	# ---------------- UI 构建 ----------------
 	def _build(self):
-		outer=ttk.Frame(self.root,padding=(8,6,8,6)); outer.pack(fill='both',expand=True)
-		# I/O (支持目录或单文件)
-		io=ttk.Frame(outer); io.pack(fill='x',pady=(0,6))
-		for i in range(10): io.columnconfigure(i,weight=1 if i in (1,6) else 0)
-		ttk.Label(io,text='输入:').grid(row=0,column=0,sticky='e')
-		self.in_var=tk.StringVar(); ent_in=ttk.Entry(io,textvariable=self.in_var,width=40); ent_in.grid(row=0,column=1,sticky='we',padx=3)
-		btn_in=ttk.Button(io,text='目录',command=self._pick_in,width=5); btn_in.grid(row=0,column=2,padx=(0,3))
-		btn_in_file=ttk.Button(io,text='文件',command=self._pick_in_file,width=5); btn_in_file.grid(row=0,column=3,padx=(0,8))
-		self.recursive_var=tk.BooleanVar(value=False); cb_rec=ttk.Checkbutton(io,text='递归',variable=self.recursive_var); cb_rec.grid(row=0,column=4,sticky='w')
-		ttk.Label(io,text='输出:').grid(row=0,column=5,sticky='e')
-		self.out_var=tk.StringVar(); ent_out=ttk.Entry(io,textvariable=self.out_var,width=32); ent_out.grid(row=0,column=6,sticky='we',padx=3)
-		self.out_var.trace_add('write', self._on_out_dir_change)
-		btn_out=ttk.Button(io,text='选择',command=self._pick_out,width=6); btn_out.grid(row=0,column=7,padx=(2,0))
-		btn_open_out=ttk.Button(io,text='打开',command=self._open_last_out,width=6); btn_open_out.grid(row=0,column=8,padx=(4,0))
+		"""构建主界面"""
+		# 主容器
+		self.outer = ttk.Frame(self.root, padding=(10, 8, 10, 8))
+		self.outer.pack(fill='both', expand=True)
 		
-		# 跳过格式设置 (全局输入过滤)
-		skip_frame=ttk.LabelFrame(outer,text='跳过(过滤)格式'); skip_frame.pack(fill='x',pady=(0,6))
+		# 按功能区域构建界面
+		self._build_io_section()
+		self._build_skip_formats_section()
+		self._build_functions_section()
+		self._build_classification_section()  # 这个方法包含了所有剩余的UI构建
+		self._setup_tooltips()
+
+	def _build_io_section(self):
+		"""构建输入输出区域"""
+		io_frame = ttk.LabelFrame(self.outer, text="输入输出配置", padding=(8, 6))
+		io_frame.pack(fill='x', pady=(0, 8))
+		
+		# 配置列权重
+		for i in range(10):
+			io_frame.columnconfigure(i, weight=1 if i in (1, 6) else 0)
+		
+		# 输入行
+		ttk.Label(io_frame, text='输入:').grid(row=0, column=0, sticky='e', padx=(0, 5))
+		self.in_var = tk.StringVar()
+		ent_in = ttk.Entry(io_frame, textvariable=self.in_var, width=40)
+		ent_in.grid(row=0, column=1, sticky='we', padx=3)
+		
+		btn_in = ttk.Button(io_frame, text='目录', command=self._pick_in, width=6)
+		btn_in.grid(row=0, column=2, padx=(3, 3))
+		
+		btn_in_file = ttk.Button(io_frame, text='文件', command=self._pick_in_file, width=6)
+		btn_in_file.grid(row=0, column=3, padx=(0, 8))
+		
+		self.recursive_var = tk.BooleanVar(value=False)
+		cb_rec = ttk.Checkbutton(io_frame, text='递归', variable=self.recursive_var)
+		cb_rec.grid(row=0, column=4, sticky='w')
+		
+		# 输出行
+		ttk.Label(io_frame, text='输出:').grid(row=1, column=0, sticky='e', padx=(0, 5), pady=(8, 0))
+		self.out_var = tk.StringVar()
+		ent_out = ttk.Entry(io_frame, textvariable=self.out_var, width=32)
+		ent_out.grid(row=1, column=1, sticky='we', padx=3, pady=(8, 0))
+		self.out_var.trace_add('write', self._on_out_dir_change)
+		
+		btn_out = ttk.Button(io_frame, text='选择', command=self._pick_out, width=6)
+		btn_out.grid(row=1, column=2, padx=(3, 3), pady=(8, 0))
+		
+		btn_open_out = ttk.Button(io_frame, text='打开', command=self._open_last_out, width=6)
+		btn_open_out.grid(row=1, column=3, padx=(0, 0), pady=(8, 0))
+		
+		# 保存引用供tooltip使用
+		self.ent_in = ent_in
+		self.btn_in = btn_in
+		self.btn_in_file = btn_in_file
+		self.cb_rec = cb_rec
+		self.ent_out = ent_out
+		self.btn_out = btn_out
+		self.btn_open_out = btn_open_out
+		
+	def _build_skip_formats_section(self):
+		"""构建跳过格式配置区域"""
+		skip_frame = ttk.LabelFrame(self.outer, text='跳过(过滤)格式', padding=(8, 6))
+		skip_frame.pack(fill='x', pady=(0, 8))
+		
+		# 启用控制行
 		skip_enable_frame = ttk.Frame(skip_frame)
-		skip_enable_frame.pack(fill='x', pady=(4,2))
-		skip_enable_cb = ttk.Checkbutton(skip_enable_frame, text='启用跳过功能', variable=self.skip_formats_enabled, command=self._toggle_skip_formats)
+		skip_enable_frame.pack(fill='x', pady=(0, 4))
+		
+		skip_enable_cb = ttk.Checkbutton(skip_enable_frame, text='启用跳过功能', 
+										variable=self.skip_formats_enabled, 
+										command=self._toggle_skip_formats)
 		skip_enable_cb.pack(side='left')
-		skip_convert_only_cb = ttk.Checkbutton(skip_enable_frame, text='仅格式转换跳过', variable=self.skip_convert_only)
-		skip_convert_only_cb.pack(side='left', padx=(20,0))
+		
+		skip_convert_only_cb = ttk.Checkbutton(skip_enable_frame, text='仅格式转换跳过', 
+											   variable=self.skip_convert_only)
+		skip_convert_only_cb.pack(side='left', padx=(20, 0))
 		self.skip_convert_only_cb = skip_convert_only_cb
 		
-		# 格式选择区域 - 单行布局
+		# 预设格式选择行
 		formats_frame = ttk.Frame(skip_frame)
-		formats_frame.pack(fill='x', pady=(0,2))
-		ttk.Label(formats_frame, text='预设:').pack(side='left')
+		formats_frame.pack(fill='x', pady=(0, 4))
+		ttk.Label(formats_frame, text='预设:').pack(side='left', padx=(0, 8))
 		
-		# 预设格式复选框
 		format_options = [
-			('JPEG', self.skip_jpeg),
-			('PNG', self.skip_png),
-			('WebP', self.skip_webp),
-			('GIF', self.skip_gif),
-			('BMP', self.skip_bmp),
-			('TIFF', self.skip_tiff),
-			('ICO', self.skip_ico)
+			('JPEG', self.skip_jpeg), ('PNG', self.skip_png),
+			('WebP', self.skip_webp), ('GIF', self.skip_gif),
+			('BMP', self.skip_bmp), ('TIFF', self.skip_tiff), ('ICO', self.skip_ico)
 		]
 		
 		self.skip_format_checkboxes = []
-		for i, (text, var) in enumerate(format_options):
+		for text, var in format_options:
 			cb = ttk.Checkbutton(formats_frame, text=text, variable=var)
-			cb.pack(side='left', padx=(8,6))
+			cb.pack(side='left', padx=(0, 12))
 			self.skip_format_checkboxes.append(cb)
 		
-		# 自定义格式输入框
+		# 自定义格式输入行
 		custom_frame = ttk.Frame(skip_frame)
-		custom_frame.pack(fill='x', pady=(0,4))
-		ttk.Label(custom_frame, text='自定义:').pack(side='left')
-		self.skip_custom_entry = ttk.Entry(custom_frame, textvariable=self.skip_custom_var, width=20)
-		self.skip_custom_entry.pack(side='left', padx=(4,8))
-		ttk.Label(custom_frame, text='(多个格式用空格或逗号分隔，如: AVIF HEIC)', foreground='gray').pack(side='left')
+		custom_frame.pack(fill='x', pady=(0, 2))
+		ttk.Label(custom_frame, text='自定义:').pack(side='left', padx=(0, 8))
 		
-		# 初始状态下禁用格式选择
+		self.skip_custom_entry = ttk.Entry(custom_frame, textvariable=self.skip_custom_var, width=25)
+		self.skip_custom_entry.pack(side='left', padx=(0, 8))
+		
+		help_label = ttk.Label(custom_frame, text='(多个格式用空格或逗号分隔，如: AVIF HEIC)', 
+							   foreground='gray')
+		help_label.pack(side='left')
+		
+		# 初始状态禁用
 		self._toggle_skip_formats()
+
+	def _build_functions_section(self):
+		"""构建功能选择区域"""
+		opts_frame = ttk.LabelFrame(self.outer, text="功能配置", padding=(8, 6))
+		opts_frame.pack(fill='x', pady=(0, 8))
 		
-		# 功能
-		opts=ttk.Frame(outer); opts.pack(fill='x',pady=(0,8))
-		self.enable_dedupe=tk.BooleanVar(value=False)
-		self.enable_convert=tk.BooleanVar(value=False)
-		self.enable_rename=tk.BooleanVar(value=False)
-		# 比例分类配置 (新独立区域)
-		self.classify_ratio_var=tk.BooleanVar(value=False)
-		# 形状分类配置
-		self.classify_shape_var=tk.BooleanVar(value=False)
-		self.shape_tolerance_var=tk.DoubleVar(value=0.15)  # 方形容差，默认15%
-		self.shape_square_name=tk.StringVar(value='zfx')  # 方形文件夹名
-		self.shape_horizontal_name=tk.StringVar(value='hp')  # 横向文件夹名
-		self.shape_vertical_name=tk.StringVar(value='sp')  # 纵向文件夹名
-		# 比例分类默认容差 15%
-		self.ratio_tol_var=tk.DoubleVar(value=0.15)
-		# 保留常用预设: 16:9,3:2,4:3,1:1,21:9
-		self.ratio_custom_var=tk.StringVar(value='16:9,3:2,4:3,1:1,21:9')
-		self.ratio_snap_var=tk.BooleanVar(value=False)  # 不匹配是否取最近
-		cb_classify=ttk.Checkbutton(opts,text='比例分类',variable=self.classify_ratio_var); cb_classify.pack(side='left',padx=2)
-		cb_shape=ttk.Checkbutton(opts,text='形状分类',variable=self.classify_shape_var); cb_shape.pack(side='left',padx=2)
-		cb_convert=ttk.Checkbutton(opts,text='转换',variable=self.enable_convert); cb_convert.pack(side='left',padx=2)
-		cb_dedupe=ttk.Checkbutton(opts,text='去重',variable=self.enable_dedupe); cb_dedupe.pack(side='left',padx=2)
-		cb_rename=ttk.Checkbutton(opts,text='重命名',variable=self.enable_rename); cb_rename.pack(side='left',padx=2)
-		ttk.Label(opts,text='线程').pack(side='left',padx=(12,2))
-		# 默认线程数 16
-		self.workers_var=tk.IntVar(value=16)
-		sp_workers=ttk.Spinbox(opts,from_=1,to=64,textvariable=self.workers_var,width=5); sp_workers.pack(side='left')
-		# 统一的删源选项
-		self.global_remove_src=tk.BooleanVar(value=False)
-		cb_global_rm_src=ttk.Checkbutton(opts,text='删源',variable=self.global_remove_src); cb_global_rm_src.pack(side='left',padx=(8,0))
-		btn_start=ttk.Button(opts,text='开始',command=lambda: self._start(write_to_output=True),width=8); btn_start.pack(side='right',padx=2)
-		btn_preview=ttk.Button(opts,text='预览',command=self._preview,width=8); btn_preview.pack(side='right',padx=2)
-		btn_cancel=ttk.Button(opts,text='取消',command=self._cancel,width=8); btn_cancel.pack(side='right',padx=2)
-		# 分类 (第一阶段)
-		ttk.Separator(outer,orient='horizontal').pack(fill='x',pady=(0,4))
-		clsf=ttk.LabelFrame(outer,text='比例分类'); clsf.pack(fill='x',pady=(0,10))
-		self.frame_ratio=clsf
-		clsf.columnconfigure(5,weight=1)
+		# 功能变量初始化
+		self.enable_dedupe = tk.BooleanVar(value=False)
+		self.enable_convert = tk.BooleanVar(value=False)
+		self.enable_rename = tk.BooleanVar(value=False)
+		self.workers_var = tk.IntVar(value=16)
+		self.global_remove_src = tk.BooleanVar(value=False)
+		
+		# 分类变量初始化
+		self.classify_ratio_var = tk.BooleanVar(value=False)
+		self.classify_shape_var = tk.BooleanVar(value=False)
+		self.shape_tolerance_var = tk.DoubleVar(value=0.15)  # 方形容差，默认15%
+		self.shape_square_name = tk.StringVar(value='zfx')  # 方形文件夹名
+		self.shape_horizontal_name = tk.StringVar(value='hp')  # 横向文件夹名
+		self.shape_vertical_name = tk.StringVar(value='sp')  # 纵向文件夹名
+		self.ratio_tol_var = tk.DoubleVar(value=0.15)
+		self.ratio_custom_var = tk.StringVar(value='16:9,3:2,4:3,1:1,21:9')
+		self.ratio_snap_var = tk.BooleanVar(value=False)  # 不匹配是否取最近
+		
+		# 主功能复选框行
+		functions_row = ttk.Frame(opts_frame)
+		functions_row.pack(fill='x', pady=(0, 4))
+		
+		self.cb_classify = ttk.Checkbutton(functions_row, text='比例分类', variable=self.classify_ratio_var)
+		self.cb_classify.pack(side='left', padx=(0, 8))
+		
+		self.cb_shape = ttk.Checkbutton(functions_row, text='形状分类', variable=self.classify_shape_var)
+		self.cb_shape.pack(side='left', padx=(0, 8))
+		
+		self.cb_convert = ttk.Checkbutton(functions_row, text='转换', variable=self.enable_convert)
+		self.cb_convert.pack(side='left', padx=(0, 8))
+		
+		self.cb_dedupe = ttk.Checkbutton(functions_row, text='去重', variable=self.enable_dedupe)
+		self.cb_dedupe.pack(side='left', padx=(0, 8))
+		
+		self.cb_rename = ttk.Checkbutton(functions_row, text='重命名', variable=self.enable_rename)
+		self.cb_rename.pack(side='left', padx=(0, 8))
+		
+		# 控制选项行
+		controls_row = ttk.Frame(opts_frame)
+		controls_row.pack(fill='x', pady=(0, 4))
+		
+		ttk.Label(controls_row, text='线程:').pack(side='left', padx=(0, 4))
+		self.sp_workers = ttk.Spinbox(controls_row, from_=1, to=64, textvariable=self.workers_var, width=5)
+		self.sp_workers.pack(side='left', padx=(0, 16))
+		
+		self.cb_global_rm_src = ttk.Checkbutton(controls_row, text='删源', variable=self.global_remove_src)
+		self.cb_global_rm_src.pack(side='left', padx=(0, 16))
+		
+		# 操作按钮
+		self.btn_cancel = ttk.Button(controls_row, text='取消', command=self._cancel, width=8)
+		self.btn_cancel.pack(side='right', padx=(4, 0))
+		
+		self.btn_preview = ttk.Button(controls_row, text='预览', command=self._preview, width=8)
+		self.btn_preview.pack(side='right', padx=(4, 0))
+		
+		self.btn_start = ttk.Button(controls_row, text='开始', command=lambda: self._start(write_to_output=True), width=8)
+		self.btn_start.pack(side='right', padx=(4, 0))
+
+	def _build_classification_section(self):
+		"""构建分类配置区域"""
+		# 比例分类
+		ratio_frame = ttk.LabelFrame(self.outer, text='比例分类', padding=(8, 6))
+		ratio_frame.pack(fill='x', pady=(0, 8))
+		self.frame_ratio = ratio_frame
+		ratio_frame.columnconfigure(5, weight=1)
+		
 		# 分类内部控件（除启用复选框外可整体禁用）
-		self.cb_ratio_inner_snap=ttk.Checkbutton(clsf,text='不匹配吸附最近',variable=self.ratio_snap_var)
-		cb_tol_label=ttk.Label(clsf,text='容差')
-		sp_rt=ttk.Spinbox(clsf,from_=0.0,to=0.2,increment=0.005,format='%.3f',width=6,textvariable=self.ratio_tol_var)
-		btn_reset_ratio=ttk.Button(clsf,text='恢复默认',width=10,command=lambda: self.ratio_custom_var.set('16:9,3:2,4:3,1:1,21:9'))
-		lbl_ratio_input=ttk.Label(clsf,text='自定义(16:9 16x10 ...)')
-		ent_ratio=ttk.Entry(clsf,textvariable=self.ratio_custom_var,width=58)
+		self.cb_ratio_inner_snap = ttk.Checkbutton(ratio_frame, text='不匹配吸附最近', variable=self.ratio_snap_var)
+		cb_tol_label = ttk.Label(ratio_frame, text='容差')
+		sp_rt=ttk.Spinbox(ratio_frame,from_=0.0,to=0.2,increment=0.005,format='%.3f',width=6,textvariable=self.ratio_tol_var)
+		btn_reset_ratio=ttk.Button(ratio_frame,text='恢复默认',width=10,command=lambda: self.ratio_custom_var.set('16:9,3:2,4:3,1:1,21:9'))
+		lbl_ratio_input=ttk.Label(ratio_frame,text='自定义(16:9 16x10 ...)')
+		ent_ratio=ttk.Entry(ratio_frame,textvariable=self.ratio_custom_var,width=58)
 		# 保存引用供后续 tooltip / 状态控制
 		self._ratio_sp_rt=sp_rt; self._ratio_ent=ent_ratio; self._ratio_btn_reset=btn_reset_ratio; self._ratio_snap=self.cb_ratio_inner_snap; self._ratio_lbl_input=lbl_ratio_input; self._ratio_lbl_tol=cb_tol_label
 		# 布局
@@ -472,7 +617,7 @@ class ImageToolApp:
 		lbl_ratio_input.grid(row=1,column=0,sticky='e',pady=(4,0))
 		ent_ratio.grid(row=1,column=1,columnspan=4,sticky='we',pady=(4,2))
 		# 预设比例按钮行
-		preset_frame=ttk.Frame(clsf)
+		preset_frame=ttk.Frame(ratio_frame)
 		preset_frame.grid(row=2,column=0,columnspan=5,sticky='w',pady=(2,2))
 		presets=['16:9','16:10','4:3','3:2','5:4','21:9','1:1']
 		def _toggle_ratio(val:str):
@@ -496,8 +641,8 @@ class ImageToolApp:
 		self._ratio_btn_clear=btn_clear
 		
 		# 形状分类 (新区域)
-		ttk.Separator(outer,orient='horizontal').pack(fill='x',pady=(0,4))
-		shape_frame=ttk.LabelFrame(outer,text='形状分类'); shape_frame.pack(fill='x',pady=(0,10))
+		ttk.Separator(self.outer,orient='horizontal').pack(fill='x',pady=(0,4))
+		shape_frame=ttk.LabelFrame(self.outer,text='形状分类'); shape_frame.pack(fill='x',pady=(0,10))
 		self.frame_shape=shape_frame
 		shape_frame.columnconfigure(5,weight=1)
 		
@@ -552,8 +697,8 @@ class ImageToolApp:
 		self._shape_lbl_vertical=lbl_vertical
 		
 		# 转换 (第二阶段)
-		ttk.Separator(outer,orient='horizontal').pack(fill='x',pady=(0,4))
-		convert=ttk.LabelFrame(outer,text='格式转换'); convert.pack(fill='x',pady=(0,10))
+		ttk.Separator(self.outer,orient='horizontal').pack(fill='x',pady=(0,4))
+		convert=ttk.LabelFrame(self.outer,text='格式转换'); convert.pack(fill='x',pady=(0,10))
 		self.frame_convert=convert
 		self.fmt_var=tk.StringVar(value=_rev_map(FMT_MAP)['webp'])
 		self.quality_var=tk.IntVar(value=100)
@@ -566,14 +711,20 @@ class ImageToolApp:
 		self.ico_square_mode=tk.StringVar(value='fit')  # keep|center|topleft|fit
 		ttk.Label(convert,text='格式').grid(row=0,column=0,sticky='e')
 		cb_fmt=ttk.Combobox(convert,textvariable=self.fmt_var,values=list(FMT_MAP.keys()),width=12,state='readonly'); cb_fmt.grid(row=0,column=1,sticky='w',padx=(0,12))
+		self.cb_fmt = cb_fmt  # 保存引用用于tooltip
 		ttk.Label(convert,text='质量').grid(row=0,column=2,sticky='e')
 		sc_q=ttk.Scale(convert,from_=1,to=100,orient='horizontal',variable=self.quality_var,length=220); sc_q.grid(row=0,column=3,sticky='we',padx=(2,6))
+		self.sc_q = sc_q  # 保存引用用于tooltip
 		sp_q=ttk.Spinbox(convert,from_=1,to=100,textvariable=self.quality_var,width=5); sp_q.grid(row=0,column=4,sticky='w',padx=(0,8))
+		self.sp_q = sp_q  # 保存引用用于tooltip
 		cb_same=ttk.Checkbutton(convert,text='同格式也重存',variable=self.process_same_var); cb_same.grid(row=0,column=5,sticky='w')
+		self.cb_same = cb_same  # 保存引用用于tooltip
 		cb_png3=ttk.Checkbutton(convert,text='PNG3压缩',variable=self.png3_var); cb_png3.grid(row=0,column=6,sticky='w')
+		self.cb_png3 = cb_png3  # 保存引用用于tooltip
 		# ICO 尺寸输入 (仅当选择 ico 有效)
 		lbl_ico=ttk.Label(convert,text='ICO尺寸')
 		ent_ico=ttk.Entry(convert,textvariable=self.ico_sizes_var,width=22)
+		self.ent_ico = ent_ico  # 保存引用用于tooltip
 		lbl_ico.grid(row=1,column=0,sticky='e',pady=(4,0))
 		ent_ico.grid(row=1,column=1,sticky='w',pady=(4,0))
 		# 复选框区域
@@ -600,8 +751,8 @@ class ImageToolApp:
 		self.ico_keep_cb=cb_keep; self.ico_custom_entry=ent_ico; self.ico_label=lbl_ico
 		
 		# 去重 (第三阶段)
-		ttk.Separator(outer,orient='horizontal').pack(fill='x',pady=(0,4))
-		dedupe=ttk.LabelFrame(outer,text='去重设置'); dedupe.pack(fill='x',pady=(0,10))
+		ttk.Separator(self.outer,orient='horizontal').pack(fill='x',pady=(0,4))
+		dedupe=ttk.LabelFrame(self.outer,text='去重设置'); dedupe.pack(fill='x',pady=(0,10))
 		self.frame_dedupe=dedupe
 		# 去重阈值默认 3
 		self.threshold_var=tk.IntVar(value=3)
@@ -612,10 +763,13 @@ class ImageToolApp:
 		for i in range(11): dedupe.columnconfigure(i,weight=0)
 		ttk.Label(dedupe,text='阈值').grid(row=0,column=0,sticky='e')
 		sp_th=ttk.Spinbox(dedupe,from_=0,to=32,textvariable=self.threshold_var,width=5); sp_th.grid(row=0,column=1,sticky='w',padx=(0,8))
+		self.sp_th = sp_th  # 保存引用用于tooltip
 		ttk.Label(dedupe,text='保留').grid(row=0,column=2,sticky='e')
 		cb_keep=ttk.Combobox(dedupe,textvariable=self.keep_var,values=list(KEEP_MAP.keys()),width=12,state='readonly'); cb_keep.grid(row=0,column=3,sticky='w',padx=(0,8))
+		self.cb_keep = cb_keep  # 保存引用用于tooltip
 		ttk.Label(dedupe,text='动作').grid(row=0,column=4,sticky='e')
 		cb_action=ttk.Combobox(dedupe,textvariable=self.dedup_action_var,values=list(ACTION_MAP.keys()),width=10,state='readonly'); cb_action.grid(row=0,column=5,sticky='w',padx=(0,8))
+		self.cb_action = cb_action  # 保存引用用于tooltip
 		col_mv=6
 		ttk.Label(dedupe,text='移动到').grid(row=0,column=col_mv,sticky='e')
 		self.move_dir_entry=ttk.Entry(dedupe,textvariable=self.move_dir_var,width=24); self.move_dir_entry.grid(row=0,column=col_mv+1,sticky='w')
@@ -624,8 +778,8 @@ class ImageToolApp:
 		for i in range(8):
 			if i!=3: convert.columnconfigure(i,weight=0)
 		# 重命名
-		ttk.Separator(outer,orient='horizontal').pack(fill='x',pady=(0,4))
-		rename=ttk.LabelFrame(outer,text='重命名'); rename.pack(fill='x',pady=(0,10))
+		ttk.Separator(self.outer,orient='horizontal').pack(fill='x',pady=(0,4))
+		rename=ttk.LabelFrame(self.outer,text='重命名'); rename.pack(fill='x',pady=(0,10))
 		self.frame_rename=rename
 		self.pattern_var=tk.StringVar(value='{name}_{index}.{fmt}')
 		self.start_var=tk.IntVar(value=1)
@@ -645,13 +799,13 @@ class ImageToolApp:
 		cb_over=ttk.Combobox(rename,textvariable=self.overwrite_var,values=list(OVERWRITE_MAP.keys()),width=12,state='readonly'); cb_over.grid(row=0,column=9,sticky='w')
 		for i in range(10): rename.columnconfigure(i,weight=0)
 		# 进度
-		ttk.Separator(outer,orient='horizontal').pack(fill='x',pady=(0,6))
-		self.progress=ttk.Progressbar(outer,maximum=100); self.progress.pack(fill='x',pady=(0,4))
-		self.status_var=tk.StringVar(value='就绪'); ttk.Label(outer,textvariable=self.status_var,foreground='blue').pack(fill='x')
+		ttk.Separator(self.outer,orient='horizontal').pack(fill='x',pady=(0,6))
+		self.progress=ttk.Progressbar(self.outer,maximum=100); self.progress.pack(fill='x',pady=(0,4))
+		self.status_var=tk.StringVar(value='就绪'); ttk.Label(self.outer,textvariable=self.status_var,foreground='blue').pack(fill='x')
 		# 日志
-		ttk.Separator(outer,orient='horizontal').pack(fill='x',pady=(4,4))
+		ttk.Separator(self.outer,orient='horizontal').pack(fill='x',pady=(4,4))
 		# 日志筛选工具条
-		filter_bar=ttk.Frame(outer); filter_bar.pack(fill='x',pady=(0,2))
+		filter_bar=ttk.Frame(self.outer); filter_bar.pack(fill='x',pady=(0,2))
 		self.log_filter_stage=tk.StringVar(value='全部')
 		self.log_filter_kw=tk.StringVar()
 		self.log_filter_fail=tk.BooleanVar(value=False)
@@ -671,7 +825,7 @@ class ImageToolApp:
 		self.log_filter_stage.trace_add('write', self._on_change_log_filter)
 		self.log_filter_kw.trace_add('write', self._on_change_log_filter)
 		self.log_filter_fail.trace_add('write', self._on_change_log_filter)
-		pan=ttk.PanedWindow(outer,orient='vertical'); pan.pack(fill='both',expand=True)
+		pan=ttk.PanedWindow(self.outer,orient='vertical'); pan.pack(fill='both',expand=True)
 		self.paned=pan  # 保存引用用于自动调整
 		upper=ttk.Frame(pan); lower=ttk.Frame(pan)
 		self.upper_frame=upper; self.lower_frame=lower
@@ -727,69 +881,6 @@ class ImageToolApp:
 		self.enable_convert.trace_add('write', lambda *a: self._update_states())
 		self.enable_rename.trace_add('write', lambda *a: self._update_states())
 		self.enable_dedupe.trace_add('write', lambda *a: self._update_states())
-		self.classify_ratio_var.trace_add('write', lambda *a: self._update_states())
-		self.classify_shape_var.trace_add('write', lambda *a: self._update_states())
-		self.dedup_action_var.trace_add('write', lambda *a: self._update_states())
-		self.fmt_var.trace_add('write', lambda *a: self._update_states())
-		# tooltips
-		tips=[
-			(ent_in,'输入目录/文件 (支持常见图片)'),(btn_in,'选择输入目录'),(btn_in_file,'选择单个图片文件'),(cb_rec,'是否递归子目录 (单文件时忽略)'),
-			(ent_out,'输出目录 (留空=跟随输入目录或文件所在目录)'),(btn_out,'选择输出目录'),(btn_open_out,'打开输出目录'),
-			(cb_classify,'按比例分类：根据自定义比例列表创建子目录，支持容差和吸附设置'),(cb_shape,'按形状分类：将图片按横向(宽>高)、纵向(高>宽)、方形(宽≈高)分类，支持自定义容差和文件夹名称'),
-			(cb_dedupe,'勾选执行重复检测'),(cb_convert,'勾选执行格式转换'),(cb_rename,'勾选执行重命名'),
-			(sp_workers,'并行线程数'),(btn_start,'真实执行'),(btn_preview,'仅预览不写入'),(btn_cancel,'取消执行'),
-			(sp_th,'相似阈值 0：严格 |  >0：近似'),(cb_keep,'重复组保留策略'),(cb_action,'重复文件动作'),
-			# 回收站提示已移除，自动处理
-			(self.move_dir_entry,'重复文件移动目标'),(self.move_dir_btn,'选择移动目录'),
-			(cb_fmt,'目标格式'),(sc_q,'拖动调整质量'),(sp_q,'直接输入质量 1-100'),(cb_same,'同格式也重新编码'),(cb_png3,'PNG 高压缩'),
-			(ent_ico,'ICO 自定义尺寸: 逗号/空格分隔 例如 24,40'),
-		]
-		# 跳过格式提示
-		if hasattr(self, 'skip_formats_enabled'):
-			tips.append((skip_enable_cb,'启用格式跳过功能，基于文件实际格式而非扩展名'))
-		if hasattr(self, 'skip_convert_only_cb'):
-			tips.append((self.skip_convert_only_cb,'仅在格式转换阶段跳过，其他阶段(分类/去重/重命名)仍处理'))
-		if hasattr(self, 'skip_custom_entry'):
-			tips.append((self.skip_custom_entry,'自定义跳过格式，支持AVIF、HEIC等PIL支持的格式'))
-		# 补充 ico 勾选尺寸 tips
-		for c in self.ico_checks:
-			tips.append((c,'勾选加入该尺寸'))
-		# 补充跳过格式复选框 tips
-		if hasattr(self, 'skip_format_checkboxes'):
-			format_names = ['JPEG', 'PNG', 'WebP', 'GIF', 'BMP', 'TIFF', 'ICO']
-			for i, cb in enumerate(self.skip_format_checkboxes):
-				if i < len(format_names):
-					tips.append((cb, f'跳过{format_names[i]}格式的图片文件'))
-		# 继续追加其余
-		more_tips=[
-			(self.ico_keep_cb,'仅输出原图尺寸 (忽略其它选择)'),
-			(frame_sq,'非方图处理策略 (仅 ICO 格式时有效)'),
-			(ent_pattern,'重命名模式: {name}{ext}{index}{fmt} 支持 {index:03} 指定宽度'),(sp_start,'序号起始'),(sp_step,'序号步长'),(sp_indexw,'序号零填充宽度 (0=不填)'),(cb_over,'覆盖策略')
-		]
-		# 比例分类提示 (新区域)
-		if hasattr(self,'frame_ratio'):
-			more_tips.append((self.frame_ratio,'按常见比例创建子目录或占位符 {ratio}; 自定义: 16:9,4:3 ...; 吸附=选最近比值'))
-			if hasattr(self,'_ratio_snap'): more_tips.append((self._ratio_snap,'未命中容差时是否取最近比值标签'))
-			if hasattr(self,'_ratio_sp_rt'): more_tips.append((self._ratio_sp_rt,'相对误差容差, 默认 0.15=±15%'))
-			if hasattr(self,'_ratio_ent'): more_tips.append((self._ratio_ent,'自定义列表, 支持 16:9 / 16x9 形式'))
-			# 顶部启用按钮为 cb_classify (在 opts), 这里不重复
-		# 形状分类提示
-		if hasattr(self,'frame_shape'):
-			more_tips.append((self.frame_shape,'按图片形状分类，支持自定义容差和文件夹名称，动图会额外添加AM前缀'))
-			if hasattr(self,'_shape_sp_tol'): more_tips.append((self._shape_sp_tol,'方形判定容差，默认0.05=±5%'))
-			if hasattr(self,'_shape_ent_square'): more_tips.append((self._shape_ent_square,'方形图片的文件夹名称'))
-			if hasattr(self,'_shape_ent_horizontal'): more_tips.append((self._shape_ent_horizontal,'横向图片的文件夹名称'))
-			if hasattr(self,'_shape_ent_vertical'): more_tips.append((self._shape_ent_vertical,'纵向图片的文件夹名称'))
-			if hasattr(self,'_shape_btn_reset'): more_tips.append((self._shape_btn_reset,'重置为默认设置'))
-		tips.extend(more_tips)
-		# 补充自动调整窗口提示
-		if 'cb_auto' in locals():
-			try: tips.append((cb_auto,'根据预览图片高度自动调整窗口高度，宽度可手动调整'))
-			except Exception: pass
-		for w,t in tips: self._bind_tip(w,t)
-		self._update_states()
-		# 原始日志缓存 (用于筛选)
-		self._raw_logs=[]  # list of tuples (stage, src_full, dst_full, info, display_values, tags)
 		# 记录基础窗口最小尺寸
 		try:
 			self.root.update_idletasks(); self._base_win_width=self.root.winfo_width(); self._base_win_height=self.root.winfo_height()
@@ -800,6 +891,76 @@ class ImageToolApp:
 		# 捕获日志区初始高度用于锁定
 		self._log_fixed_height=None
 		self.root.after(400,self._capture_log_height)
+
+	def _setup_tooltips(self):
+		"""设置工具提示"""
+		# tooltips
+		tips=[
+			(self.ent_in,'输入目录/文件 (支持常见图片)'),(self.btn_in,'选择输入目录'),(self.btn_in_file,'选择单个图片文件'),(self.cb_rec,'是否递归子目录 (单文件时忽略)'),
+			(self.ent_out,'输出目录 (留空=跟随输入目录或文件所在目录)'),(self.btn_out,'选择输出目录'),(self.btn_open_out,'打开输出目录'),
+			(self.cb_classify,'按比例分类：根据自定义比例列表创建子目录，支持容差和吸附设置'),(self.cb_shape,'按形状分类：将图片按横向(宽>高)、纵向(高>宽)、方形(宽≈高)分类，支持自定义容差和文件夹名称'),
+			(self.cb_dedupe,'勾选执行重复检测'),(self.cb_convert,'勾选执行格式转换'),(self.cb_rename,'勾选执行重命名'),
+			(self.sp_workers,'并行线程数'),(self.btn_start,'真实执行'),(self.btn_preview,'仅预览不写入'),(self.btn_cancel,'取消执行'),
+		]
+		# 添加现在已经定义的组件的tooltip
+		if hasattr(self, 'sp_th'):
+			tips.extend([
+				(self.sp_th,'相似阈值 0：严格 |  >0：近似'),(self.cb_keep,'重复组保留策略'),(self.cb_action,'重复文件动作'),
+				(self.move_dir_entry,'重复文件移动目标'),(self.move_dir_btn,'选择移动目录'),
+			])
+		if hasattr(self, 'cb_fmt'):
+			tips.extend([
+				(self.cb_fmt,'目标格式'),(self.sc_q,'拖动调整质量'),(self.sp_q,'直接输入质量 1-100'),(self.cb_same,'同格式也重新编码'),(self.cb_png3,'PNG 高压缩'),
+				(self.ent_ico,'ICO 自定义尺寸: 逗号/空格分隔 例如 24,40'),
+			])
+		# 跳过格式提示
+		if hasattr(self, 'skip_enable_cb'):
+			tips.append((self.skip_enable_cb,'启用格式跳过功能，基于文件实际格式而非扩展名'))
+		if hasattr(self, 'skip_convert_only_cb'):
+			tips.append((self.skip_convert_only_cb,'仅在格式转换阶段跳过，其他阶段(分类/去重/重命名)仍处理'))
+		if hasattr(self, 'skip_custom_entry'):
+			tips.append((self.skip_custom_entry,'自定义跳过格式，支持AVIF、HEIC等PIL支持的格式'))
+		# 补充 ico 勾选尺寸 tips
+		if hasattr(self, 'ico_checks'):
+			for c in self.ico_checks:
+				tips.append((c,'勾选加入该尺寸'))
+		# 补充跳过格式复选框 tips
+		if hasattr(self, 'skip_format_checkboxes'):
+			format_names = ['JPEG', 'PNG', 'WebP', 'GIF', 'BMP', 'TIFF', 'ICO']
+			for i, cb in enumerate(self.skip_format_checkboxes):
+				if i < len(format_names):
+					tips.append((cb, f'跳过{format_names[i]}格式的图片文件'))
+		# 继续追加其余
+		more_tips=[]
+		if hasattr(self, 'ico_keep_cb'):
+			more_tips.append((self.ico_keep_cb,'仅输出原图尺寸 (忽略其它选择)'))
+		if hasattr(self, 'frame_sq'):
+			more_tips.append((self.frame_sq,'非方图处理策略 (仅 ICO 格式时有效)'))
+		# 比例分类提示 (新区域)
+		if hasattr(self,'frame_ratio'):
+			more_tips.append((self.frame_ratio,'按常见比例创建子目录或占位符 {ratio}; 自定义: 16:9,4:3 ...; 吸附=选最近比值'))
+			if hasattr(self,'_ratio_snap'): more_tips.append((self._ratio_snap,'未命中容差时是否取最近比值标签'))
+			if hasattr(self,'_ratio_sp_rt'): more_tips.append((self._ratio_sp_rt,'相对误差容差, 默认 0.15=±15%'))
+			if hasattr(self,'_ratio_ent'): more_tips.append((self._ratio_ent,'自定义列表, 支持 16:9 / 16x9 形式'))
+		# 形状分类提示
+		if hasattr(self,'frame_shape'):
+			more_tips.append((self.frame_shape,'按图片形状分类，支持自定义容差和文件夹名称，动图会额外添加AM前缀'))
+			if hasattr(self,'_shape_sp_tol'): more_tips.append((self._shape_sp_tol,'方形判定容差，默认0.05=±5%'))
+			if hasattr(self,'_shape_ent_square'): more_tips.append((self._shape_ent_square,'方形图片的文件夹名称'))
+			if hasattr(self,'_shape_ent_horizontal'): more_tips.append((self._shape_ent_horizontal,'横向图片的文件夹名称'))
+			if hasattr(self,'_shape_ent_vertical'): more_tips.append((self._shape_ent_vertical,'纵向图片的文件夹名称'))
+			if hasattr(self,'_shape_btn_reset'): more_tips.append((self._shape_btn_reset,'重置为默认设置'))
+		tips.extend(more_tips)
+		for w,t in tips: self._bind_tip(w,t)
+		self._update_states()
+		# 原始日志缓存 (用于筛选)
+		self._raw_logs=[]  # list of tuples (stage, src_full, dst_full, info, display_values, tags)
+		
+		# 设置变量跟踪
+		self.classify_ratio_var.trace_add('write', lambda *a: self._update_states())
+		self.classify_shape_var.trace_add('write', lambda *a: self._update_states())
+		self.dedup_action_var.trace_add('write', lambda *a: self._update_states())
+		self.fmt_var.trace_add('write', lambda *a: self._update_states())
 
 	# 事件
 	def _pick_in(self):
@@ -1600,7 +1761,24 @@ class ImageToolApp:
 		return kept
 
 	def _convert_rename_stage(self, files:List[str]):
-		fmt=FMT_MAP.get(self.fmt_var.get(),'png')
+		# 强健的格式获取，避免KeyError
+		fmt_key = self.fmt_var.get()
+		fmt = FMT_MAP.get(fmt_key)
+		if fmt is None:
+			# 容错处理：如果格式不在映射中，尝试常见的格式名称映射
+			fmt_key_lower = fmt_key.lower()
+			if 'jpg' in fmt_key_lower or 'jpeg' in fmt_key_lower:
+				fmt = 'jpg'
+			elif 'png' in fmt_key_lower:
+				fmt = 'png'  
+			elif 'webp' in fmt_key_lower:
+				fmt = 'webp'
+			elif 'ico' in fmt_key_lower:
+				fmt = 'ico'
+			else:
+				fmt = 'png'  # 默认fallback
+				self.q.put(f'STATUS 未知格式 "{fmt_key}"，使用PNG作为默认格式')
+		
 		process_same=self.process_same_var.get(); quality=self.quality_var.get(); png3=self.png3_var.get()
 		pattern=self.pattern_var.get(); start=self.start_var.get(); step=self.step_var.get()
 		overwrite=OVERWRITE_MAP.get(self.overwrite_var.get(),'overwrite')
@@ -1801,18 +1979,37 @@ class ImageToolApp:
 						if convert_path!=final_path:
 							# 确保目标目录存在
 							os.makedirs(os.path.dirname(final_path), exist_ok=True)
+							# 如果转换成功，从convert_path重命名；如果转换失败，从原文件复制并重命名
 							if os.path.exists(convert_path):
-								# 在同一目录内重命名，删除原文件
+								# 转换成功的情况：在同一目录内重命名
 								os.rename(convert_path, final_path)
-						ok_rename=True; msg_rename='命名(预览)'
+							elif not ok_convert and os.path.exists(src):
+								# 转换失败但需要重命名：直接从源文件复制到最终路径
+								shutil.copy2(src, final_path)
+								msg_rename='转换失败，原样重命名(预览)'
+							else:
+								raise FileNotFoundError(f"转换结果文件不存在且源文件无法访问")
+						ok_rename=True
+						if msg_rename == '':
+							msg_rename='命名(预览)'
 					except PermissionError as e:
 						ok_rename=False; msg_rename=f'命名失败(预览): 权限不足'
 					except Exception as e:
 						ok_rename=False; msg_rename=f'命名失败(预览):{e}'
 				else:
 					try:
-						os.replace(convert_path,final_path)
-						ok_rename=True; msg_rename='命名'
+						# 真实执行模式
+						if os.path.exists(convert_path):
+							# 转换成功：正常重命名
+							os.replace(convert_path,final_path)
+							ok_rename=True; msg_rename='命名'
+						elif not ok_convert and os.path.exists(src):
+							# 转换失败但需要重命名：直接从源文件复制到最终路径
+							os.makedirs(os.path.dirname(final_path), exist_ok=True)
+							shutil.copy2(src, final_path)
+							ok_rename=True; msg_rename='转换失败，原样重命名'
+						else:
+							raise FileNotFoundError(f"转换结果文件不存在且源文件无法访问")
 					except PermissionError as e:
 						ok_rename=False; msg_rename=f'命名失败: 权限不足'
 					except Exception as e:
@@ -2112,7 +2309,24 @@ class ImageToolApp:
 		return digest
 
 	def _convert_stage_only(self, files:list[str])->list[str]:
-		fmt=FMT_MAP.get(self.fmt_var.get(),'png')
+		# 强健的格式获取，避免KeyError
+		fmt_key = self.fmt_var.get()
+		fmt = FMT_MAP.get(fmt_key)
+		if fmt is None:
+			# 容错处理：如果格式不在映射中，尝试常见的格式名称映射
+			fmt_key_lower = fmt_key.lower()
+			if 'jpg' in fmt_key_lower or 'jpeg' in fmt_key_lower:
+				fmt = 'jpg'
+			elif 'png' in fmt_key_lower:
+				fmt = 'png'  
+			elif 'webp' in fmt_key_lower:
+				fmt = 'webp'
+			elif 'ico' in fmt_key_lower:
+				fmt = 'ico'
+			else:
+				fmt = 'png'  # 默认fallback
+				self.q.put(f'STATUS 未知格式 "{fmt_key}"，使用PNG作为默认格式')
+		
 		process_same=self.process_same_var.get(); quality=self.quality_var.get(); png3=self.png3_var.get()
 		workers=max(1,self.workers_var.get())
 		real_out=self.out_var.get().strip() or self.in_var.get().strip()
