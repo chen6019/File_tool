@@ -1,5 +1,13 @@
 """图片工具 - 多功能图片处理工具
-支持格式转换、重复图片检测、分类整理、批量重命名等功能
+
+这是一个基于Tkinter的图片处理应用程序，提供以下主要功能：
+- 图片格式转换（JPG、PNG、WebP、ICO等）
+- 重复图片检测与去重（支持hash算法）
+- 批量图片重命名（支持多种命名模式）
+- 图片分类整理（按分辨率、格式等）
+- 实时预览与处理进度显示
+
+支持多线程处理，具有友好的图形界面和详细的操作日志。
 """
 from __future__ import annotations
 import os
@@ -80,12 +88,31 @@ STAGE_MAP_DISPLAY = {
 }
 
 def _rev_map(mp:dict):
+	"""
+	创建字典的反向映射
+	
+	Args:
+		mp: 原始字典，键值对为 {key: value}
+		
+	Returns:
+		dict: 反向映射字典 {value: key}
+	"""
 	return {v:k for k,v in mp.items()}
 
 def iter_images(root:str, recursive:bool, skip_formats:set=None) -> Iterable[str]:
 	"""
-	遍历图片文件，使用实际文件格式检测而非扩展名
-	skip_formats: 要跳过的格式集合，如 {'JPEG', 'PNG'}
+	遍历指定目录中的所有图片文件
+	
+	使用PIL检测实际文件格式而非仅依赖扩展名，确保准确识别图片文件。
+	支持跳过指定格式和递归/非递归遍历。
+	
+	Args:
+		root: 要扫描的根目录路径
+		recursive: 是否递归扫描子目录
+		skip_formats: 要跳过的图片格式集合，如 {'JPEG', 'PNG'}
+		
+	Yields:
+		str: 有效图片文件的完整路径
 	"""
 	if skip_formats is None:
 		skip_formats = set()
@@ -118,17 +145,54 @@ def iter_images(root:str, recursive:bool, skip_formats:set=None) -> Iterable[str
 			break
 
 def norm_ext(path:str)->str:
+	"""
+	标准化文件扩展名
+	
+	将文件路径的扩展名转换为小写，并将jpeg统一为jpg
+	
+	Args:
+		path: 文件路径
+		
+	Returns:
+		str: 标准化后的扩展名（不含点号）
+	"""
 	e=os.path.splitext(path)[1].lower().lstrip('.')
 	return 'jpg' if e=='jpeg' else e
 
 def next_non_conflict(path:str)->str:
+	"""
+	生成不冲突的文件路径
+	
+	如果目标路径已存在文件，自动在文件名后添加数字后缀避免冲突
+	
+	Args:
+		path: 原始文件路径
+		
+	Returns:
+		str: 不冲突的文件路径（如 file_1.jpg, file_2.jpg 等）
+	"""
 	base,ext=os.path.splitext(path); i=1
 	while os.path.exists(path):
 		path=f"{base}_{i}{ext}"; i+=1
 	return path
 
 def safe_delete(path:str):
-	"""删除文件: 若可用 send2trash 则发送系统回收站/废纸篓, 否则直接删除."""
+	"""
+	安全删除文件
+	
+	优先尝试将文件移动到系统回收站，如果失败则直接删除。
+	提供详细的操作结果反馈。
+	
+	Args:
+		path: 要删除的文件路径
+		
+	Returns:
+		tuple: (成功标志, 操作描述)
+			- (True, "删除->回收站") - 成功移动到回收站
+			- (True, "删除") - 直接删除成功
+			- (False, "删除失败: 权限不足") - 权限不足
+			- (False, "删失败: 错误详情") - 其他错误
+	"""
 	if send2trash is not None:
 		try:
 			send2trash(path)
@@ -150,6 +214,19 @@ def safe_delete(path:str):
 		return False,f'删失败:{e}'
 
 def ahash(im):
+	"""
+	计算图片的平均哈希值（Average Hash）
+	
+	平均哈希算法：将图片缩放为8x8灰度图，计算像素均值，
+	根据每个像素是否大于均值生成64位哈希值。
+	适用于检测相似图片，对轻微的颜色和亮度变化不敏感。
+	
+	Args:
+		im: PIL Image对象
+		
+	Returns:
+		int: 64位哈希值
+	"""
 	im=im.convert('L').resize((8,8))
 	avg=sum(im.getdata())/64.0
 	bits=0
@@ -158,6 +235,19 @@ def ahash(im):
 	return bits
 
 def dhash(im):
+	"""
+	计算图片的差分哈希值（Difference Hash）
+	
+	差分哈希算法：将图片缩放为9x8灰度图，比较相邻像素的亮度差异，
+	生成64位哈希值。相比平均哈希对图片的裁剪和缩放更敏感，
+	但对渐变和纹理变化的检测效果更好。
+	
+	Args:
+		im: PIL Image对象
+		
+	Returns:
+		int: 64位哈希值
+	"""
 	im=im.convert('L').resize((9,8))
 	pixels=list(im.getdata())
 	bits=0; idx=0
@@ -169,10 +259,33 @@ def dhash(im):
 	return bits
 
 def hamming(a:int,b:int)->int:
+	"""
+	计算两个整数的汉明距离（Hamming Distance）
+	
+	汉明距离表示两个二进制数不同位的数量。
+	在图片相似度检测中，汉明距离越小表示图片越相似。
+	
+	Args:
+		a: 第一个整数（通常是图片哈希值）
+		b: 第二个整数（通常是图片哈希值）
+		
+	Returns:
+		int: 汉明距离（0-64，哈希值为64位时）
+	"""
 	return (a^b).bit_count()
 
 def _fmt_size(n:int)->str:
-	"""人类可读文件大小"""
+	"""
+	将字节数格式化为人类可读的文件大小
+	
+	自动选择合适的单位（B、KB、MB、GB、TB）并保留适当的小数位数。
+	
+	Args:
+		n: 文件大小（字节）
+		
+	Returns:
+		str: 格式化的文件大小字符串，如 "1.5MB"、"234KB"
+	"""
 	units=['B','KB','MB','GB','TB']
 	f=float(n); i=0
 	while f>=1024 and i<len(units)-1:
@@ -180,6 +293,34 @@ def _fmt_size(n:int)->str:
 	return (f'{f:.2f}{units[i]}' if i>0 else f'{int(f)}{units[i]}')
 
 def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=None):
+	"""
+	转换单个图片文件格式
+	
+	支持多种图片格式转换，包括特殊处理逻辑：
+	- JPG转换时自动处理透明通道（转为白色背景）
+	- ICO转换时支持多种尺寸和方形处理模式
+	- GIF保持动画帧
+	- WebP和JPG支持质量控制
+	- PNG支持调色板模式
+	
+	Args:
+		src (str): 源文件路径
+		dst (str): 目标文件路径
+		fmt (str): 目标格式 ('jpg', 'png', 'webp', 'ico', 'gif')
+		quality (int, optional): 压缩质量 (1-100)，适用于JPG和WebP
+		png3 (bool): 是否将PNG转换为调色板模式以减小文件大小
+		ico_sizes (list, optional): ICO图标尺寸列表，如 [16, 32, 48]
+		square_mode (str, optional): ICO方形处理模式
+			- 'center': 居中裁剪为方形
+			- 'topleft': 左上角裁剪为方形  
+			- 'fit': 填充为方形（保持原图完整）
+			- 'keep': 保持原始比例
+			
+	Returns:
+		tuple: (是否成功, 结果描述)
+			- (True, 'OK') - 转换成功
+			- (False, 错误信息) - 转换失败，包含详细错误信息
+	"""
 	try:
 		with Image.open(src) as im:  # type: ignore
 			if fmt=='ico':
@@ -236,20 +377,58 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 
 @dataclass
 class ImgInfo:
+	"""
+	图片信息数据类
+	
+	存储图片的基本信息和哈希值，用于去重检测和文件管理。
+	
+	Attributes:
+		path (str): 图片文件的完整路径
+		size (int): 文件大小（字节）
+		w (int): 图片宽度（像素）
+		h (int): 图片高度（像素）
+		ah (int): 平均哈希值（Average Hash）
+		dh (int): 差分哈希值（Difference Hash）
+		mtime (float): 文件修改时间戳
+	"""
 	path:str; size:int; w:int; h:int; ah:int; dh:int; mtime:float
+	
 	@property
-	def res(self): return self.w*self.h
+	def res(self): 
+		"""
+		计算图片分辨率（总像素数）
+		
+		Returns:
+			int: 宽度 × 高度的像素总数
+		"""
+		return self.w*self.h
 
 class PreviewThread(threading.Thread):
-	"""独立的预览处理线程"""
+	"""
+	独立的预览处理线程
+	
+	负责在后台处理图片预览任务，避免阻塞主UI线程。
+	支持静态图片和动画图片的预览处理，自动缩放到合适大小。
+	"""
 	def __init__(self, app):
+		"""
+		初始化预览线程
+		
+		Args:
+			app: 主应用程序实例，用于回调UI更新
+		"""
 		super().__init__(daemon=True)
 		self.app = app
 		self.preview_queue = queue.Queue()
 		self.stop_flag = threading.Event()
 		
 	def run(self):
-		"""预览线程主循环"""
+		"""
+		预览线程主循环
+		
+		持续从队列中获取预览任务并处理，直到收到停止信号。
+		每个任务包含源文件路径和结果文件路径。
+		"""
 		while not self.stop_flag.is_set():
 			try:
 				task = self.preview_queue.get(timeout=1.0)
@@ -262,12 +441,26 @@ class PreviewThread(threading.Thread):
 				print(f"Preview thread error: {e}")
 	
 	def add_preview_task(self, src_path, result_path=None):
-		"""添加预览任务"""
+		"""
+		添加预览任务到队列
+		
+		Args:
+			src_path (str): 源图片文件路径
+			result_path (str, optional): 处理结果文件路径
+		"""
 		if not self.stop_flag.is_set():
 			self.preview_queue.put((src_path, result_path))
 	
 	def _process_preview_task(self, task):
-		"""处理单个预览任务"""
+		"""
+		处理单个预览任务
+		
+		在后台线程中准备图片数据，然后通过主线程回调更新UI。
+		处理过程中的任何异常都会被捕获并显示错误信息。
+		
+		Args:
+			task (tuple): 包含 (源路径, 结果路径) 的元组
+		"""
 		src_path, result_path = task
 		try:
 			# 在后台线程中准备图片数据
@@ -281,7 +474,22 @@ class PreviewThread(threading.Thread):
 			self.app.root.after_idle(lambda: self.app._show_preview_error(str(src_path), str(e)))
 	
 	def _prepare_image_data(self, path):
-		"""在后台线程中准备图片数据"""
+		"""
+		在后台线程中准备图片数据
+		
+		对图片进行缩放处理，支持静态图片和动画图片。
+		动画图片会被处理为多帧数据以支持播放。
+		
+		Args:
+			path (str): 图片文件路径
+			
+		Returns:
+			dict or None: 包含图片数据的字典，失败时返回None
+				- 'frames': 图片帧列表（PhotoImage对象）
+				- 'durations': 每帧持续时间列表（仅动画）
+				- 'is_animated': 是否为动画
+				- 'info': 图片信息字符串
+		"""
 		if not path or not os.path.exists(path):
 			return None
 		
@@ -338,7 +546,27 @@ class PreviewThread(threading.Thread):
 		self.preview_queue.put(None)  # 发送停止信号
 
 class ImageToolApp:
+	"""
+	图片工具主应用程序类
+	
+	提供完整的图片处理功能，包括：
+	- 格式转换：支持JPG、PNG、WebP、ICO等格式互转
+	- 去重检测：使用哈希算法检测并处理重复图片
+	- 批量重命名：支持多种命名规则和序号格式
+	- 图片分类：按分辨率、格式等条件自动分类
+	- 实时预览：显示处理前后的图片对比
+	- 多线程处理：支持后台批量处理和进度显示
+	
+	UI采用左右分栏布局：左侧为配置选项，右侧为日志和预览。
+	支持预览模式和正式处理模式，提供详细的操作日志。
+	"""
 	def __init__(self, root):
+		"""
+		初始化图片工具应用程序
+		
+		Args:
+			root: Tkinter根窗口对象
+		"""
 		self.root = root
 		self._setup_ui_config()
 		
@@ -383,7 +611,12 @@ class ImageToolApp:
 		self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
 	def _setup_ui_config(self):
-		"""配置UI显示设置，包括DPI感知和字体"""
+		"""
+		配置UI显示设置
+		
+		包括窗口标题、DPI感知、字体配置和窗口初始大小。
+		针对Windows系统启用DPI感知以获得更好的显示效果。
+		"""
 		self.root.title('图片工具')
 		
 		# Windows DPI感知设置
@@ -404,9 +637,9 @@ class ImageToolApp:
 		except Exception:
 			pass  # 字体配置失败时使用系统默认
 		
-		# 窗口初始大小
-		self.root.geometry("900x700")
-		self.root.minsize(800, 600)
+		# 窗口初始大小 - 设置更宽松的默认尺寸
+		self.root.geometry("1280x800")  # 更宽松的默认尺寸
+		self.root.minsize(1024, 768)  # 提高最小尺寸
 
 	def _init_skip_format_vars(self):
 		"""初始化跳过格式相关变量"""
@@ -537,7 +770,7 @@ class ImageToolApp:
 		self.preview_label=self.preview_after_label
 		self.preview_info=self.preview_after_info
 		
-		# 自动调整窗口大小选项
+		# 自动调整窗口高度选项
 		self.auto_resize_window=tk.BooleanVar(value=True)
 		cb_auto=ttk.Checkbutton(prev,text='随图调高',variable=self.auto_resize_window)
 		cb_auto.grid(row=2,column=0,columnspan=2,sticky='w',pady=(2,0))  # 跨越两列以保持对称
@@ -2817,6 +3050,10 @@ class ImageToolApp:
 		self.preview_thread.add_preview_task(src_path, result_path)
 
 	def _maybe_resize_window(self):
+		"""
+		根据预览图片大小自动调整窗口高度
+		保持宽度不变，只调整高度以适应图片显示
+		"""
 		if not getattr(self,'auto_resize_window',None): return
 		if not self.auto_resize_window.get(): return
 		self.root.update_idletasks()
@@ -2829,7 +3066,6 @@ class ImageToolApp:
 		
 		# 检查是否为文本模式（显示错误信息）
 		text_mode = getattr(self.preview_after_label, '_text_mode', False)
-		
 		if (bw==0 and aw==0) and not text_mode:
 			return
 		
@@ -2862,7 +3098,7 @@ class ImageToolApp:
 		
 		# 确保禁用宽度自动调整：始终保持当前宽度
 		cur_w=self.root.winfo_width()  # 获取当前宽度
-		min_w = getattr(self, '_min_window_width', 800)  # 最小宽度800像素
+		min_w = getattr(self, '_min_window_width', 1024)  # 最小宽度1024像素
 		final_w = max(cur_w, min_w)  # 确保不会变得太小，但不自动增大
 		
 		last=self._last_auto_size
@@ -2870,6 +3106,7 @@ class ImageToolApp:
 		if not (last and abs(last[1]-desired_h)<10):
 			self.root.geometry(f"{int(final_w)}x{int(desired_h)}")
 			self._last_auto_size=(final_w,desired_h)
+		
 		# 固定日志区高度
 		if self._log_fixed_height and hasattr(self,'paned') and hasattr(self,'upper_frame'):
 			try:
