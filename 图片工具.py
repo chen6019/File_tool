@@ -638,8 +638,8 @@ class ImageToolApp:
 			pass  # 字体配置失败时使用系统默认
 		
 		# 窗口初始大小 - 设置更宽松的默认尺寸
-		self.root.geometry("1280x800")  # 更宽松的默认尺寸
-		self.root.minsize(1024, 768)  # 提高最小尺寸
+		self.root.geometry("1600x880")  # 更宽松的默认尺寸
+		self.root.minsize(1500, 860)  # 提高最小尺寸
 
 	def _init_skip_format_vars(self):
 		"""初始化跳过格式相关变量"""
@@ -672,6 +672,7 @@ class ImageToolApp:
 		# 创建左右两列布局
 		main_paned = ttk.PanedWindow(self.outer, orient='horizontal')
 		main_paned.pack(fill='both', expand=True)
+		self.main_paned = main_paned  # 保存引用用于设置分栏比例
 		
 		# 左侧配置面板
 		self.left_frame = ttk.Frame(main_paned)
@@ -689,6 +690,9 @@ class ImageToolApp:
 		
 		# 设置工具提示
 		self._setup_tooltips()
+		
+		# 延迟设置分栏比例为五五分，使用更长的延迟确保窗口完全显示
+		self.root.after(300, self._set_initial_pane_ratio)
 
 	def _build_config_sections(self):
 		"""
@@ -1357,6 +1361,49 @@ class ImageToolApp:
 		except Exception as e:
 			self.q.put(f'LOG\tCONVERT\t{src_file}\t\t跳过转换失败:{e}')
 			return None
+
+	def _set_initial_pane_ratio(self):
+		"""
+		设置左右分栏的初始比例为五五分
+		
+		在UI完全初始化后调用，确保窗口大小已确定。
+		通过设置sash位置来实现五五分的分栏比例。
+		"""
+		try:
+			# 确保窗口已经显示并且大小已确定
+			self.root.update_idletasks()
+			
+			# 获取主分栏窗口的总宽度
+			total_width = self.main_paned.winfo_width()
+			
+			if total_width > 1:  # 确保已经完成布局
+				# 设置分栏位置为总宽度的50%
+				middle_position = total_width // 2
+				# 使用正确的方法设置sash位置
+				self.main_paned.sashpos(0, middle_position)
+			else:
+				# 如果宽度还没有确定，稍后再试
+				self.root.after(200, self._set_initial_pane_ratio_fallback)
+		except Exception as e:
+			# 如果设置失败，使用备用方法
+			self.root.after(200, self._set_initial_pane_ratio_fallback)
+	
+	def _set_initial_pane_ratio_fallback(self):
+		"""
+		备用的分栏比例设置方法
+		
+		如果主方法失败，使用更长的延迟再次尝试。
+		"""
+		try:
+			self.root.update_idletasks()
+			total_width = self.main_paned.winfo_width()
+			if total_width > 1:
+				middle_position = total_width // 2
+				# 使用正确的方法设置sash位置
+				self.main_paned.sashpos(0, middle_position)
+		except Exception:
+			# 静默失败，不影响程序运行
+			pass
 
 	def _start(self, write_to_output:bool=True):
 		"""
