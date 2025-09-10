@@ -428,16 +428,129 @@ class ImageToolApp:
 		self.outer = ttk.Frame(self.root, padding=(10, 8, 10, 8))
 		self.outer.pack(fill='both', expand=True)
 		
+		# 创建左右两列布局
+		main_paned = ttk.PanedWindow(self.outer, orient='horizontal')
+		main_paned.pack(fill='both', expand=True)
+		
+		# 左侧配置面板
+		self.left_frame = ttk.Frame(main_paned)
+		main_paned.add(self.left_frame, weight=1)
+		
+		# 右侧日志预览面板
+		self.right_frame = ttk.Frame(main_paned)
+		main_paned.add(self.right_frame, weight=1)
+		
+		# 在左侧构建配置界面
+		self._build_config_sections()
+		
+		# 在右侧构建日志预览界面
+		self._build_log_preview_sections()
+		
+		# 设置工具提示
+		self._setup_tooltips()
+
+	def _build_config_sections(self):
+		"""构建左侧配置区域"""
 		# 按功能区域构建界面
 		self._build_io_section()
 		self._build_skip_formats_section()
 		self._build_functions_section()
-		self._build_classification_section()  # 这个方法包含了所有剩余的UI构建
-		self._setup_tooltips()
+		self._build_classification_section()  # 这个方法包含了所有剩余的配置UI构建
+
+	def _build_log_preview_sections(self):
+		"""构建右侧日志预览区域"""
+		# 日志筛选工具条
+		filter_bar=ttk.Frame(self.right_frame); filter_bar.pack(fill='x',pady=(0,2))
+		self.log_filter_stage=tk.StringVar(value='全部')
+		self.log_filter_kw=tk.StringVar()
+		self.log_filter_fail=tk.BooleanVar(value=False)
+		ttk.Label(filter_bar,text='筛选:').pack(side='left')
+		cb_stage=ttk.Combobox(filter_bar,width=8,state='readonly',textvariable=self.log_filter_stage,
+			values=['全部','去重','转换','重命名','删除','移动','保留','信息'])
+		cb_stage.pack(side='left',padx=(2,4))
+		ent_kw=ttk.Entry(filter_bar,width=18,textvariable=self.log_filter_kw)
+		ent_kw.pack(side='left');
+		cb_fail=ttk.Checkbutton(filter_bar,text='仅失败',variable=self.log_filter_fail)
+		cb_fail.pack(side='left',padx=(6,0))
+		btn_reset=ttk.Button(filter_bar,text='重置',width=6,command=lambda: self._reset_log_filter())
+		btn_reset.pack(side='right',padx=(4,0))
+		btn_open_log=ttk.Button(filter_bar,text='打开日志',width=8,command=self._open_program_log)
+		btn_open_log.pack(side='right',padx=(4,0))
+		# 绑定变更实时刷新
+		self.log_filter_stage.trace_add('write', self._on_change_log_filter)
+		self.log_filter_kw.trace_add('write', self._on_change_log_filter)
+		self.log_filter_fail.trace_add('write', self._on_change_log_filter)
+		
+		# 日志和预览的垂直分割
+		pan=ttk.PanedWindow(self.right_frame,orient='vertical'); pan.pack(fill='both',expand=True)
+		self.paned=pan  # 保存引用用于自动调整
+		upper=ttk.Frame(pan); lower=ttk.Frame(pan)
+		self.upper_frame=upper; self.lower_frame=lower
+		pan.add(upper,weight=0)
+		pan.add(lower,weight=1)
+		upper.columnconfigure(0,weight=1); upper.rowconfigure(0,weight=1)
+		
+		# 日志表格
+		cols=[('stage','阶段',70),('src','源',180),('dst','目标/组',180),('info','信息',150)]
+		self.log=ttk.Treeview(upper,columns=[c[0] for c in cols],show='headings',height=12)
+		for cid,txt,w in cols: self.log.heading(cid,text=txt); self.log.column(cid,width=w,anchor='w',stretch=True)
+		self.log.grid(row=0,column=0,sticky='nsew')
+		
+		# 阶段着色 (使用 tag 样式)
+		style=ttk.Style(self.root)
+		# 尝试设置浅色背景，兼容浅/深色主题用户可自行调整
+		self.log.tag_configure('STAGE_DEDUPE', background='#FFF5E6')      # 淡橙 去重
+		self.log.tag_configure('STAGE_CONVERT', background='#E6F5FF')     # 淡蓝 转换
+		self.log.tag_configure('STAGE_RENAME', background='#F0E6FF')      # 淡紫 重命名
+		self.log.tag_configure('STAGE_CLASSIFY', background='#E6FFE6')    # 淡绿 分类
+		self.log.tag_configure('STAGE_DELETE', background='#FFE6E6')      # 淡红 删除
+		self.log.tag_configure('STAGE_MOVE', background='#E6FFE6')        # 淡绿 移动
+		self.log.tag_configure('STAGE_KEEP', background='#F5F5F5')        # 灰白 保留
+		self.log.tag_configure('STAGE_INFO', background='#EEEEEE')        # 信息行
+		
+		# 日志滚动条
+		vsb=ttk.Scrollbar(upper,orient='vertical',command=self.log.yview); vsb.grid(row=0,column=1,sticky='ns')
+		hsb=ttk.Scrollbar(upper,orient='horizontal',command=self.log.xview); hsb.grid(row=1,column=0,sticky='we')
+		self.log.configure(yscrollcommand=vsb.set,xscrollcommand=hsb.set)
+		
+		# 预览区域
+		lower.columnconfigure(0,weight=1); lower.rowconfigure(0,weight=1)
+		prev=ttk.LabelFrame(lower,text='预览 (前后对比)'); prev.pack(fill='both',expand=True)
+		for i in range(2): prev.columnconfigure(i,weight=1)
+		prev.rowconfigure(0,weight=1)
+		
+		# BEFORE
+		before_frame=ttk.Frame(prev,padding=2); before_frame.grid(row=0,column=0,sticky='nsew')
+		before_frame.columnconfigure(0,weight=1)
+		before_frame.rowconfigure(0,weight=1)
+		self.preview_before_label=ttk.Label(before_frame,text='(源)'); self.preview_before_label.grid(row=0,column=0,sticky='n')
+		self.preview_before_info=tk.StringVar(value=''); ttk.Label(before_frame,textvariable=self.preview_before_info,foreground='gray').grid(row=1,column=0,sticky='we')
+		
+		# AFTER
+		after_frame=ttk.Frame(prev,padding=2); after_frame.grid(row=0,column=1,sticky='nsew')
+		after_frame.columnconfigure(0,weight=1)
+		after_frame.rowconfigure(0,weight=1)
+		self.preview_after_label=ttk.Label(after_frame,text='(结果)'); self.preview_after_label.grid(row=0,column=0,sticky='n')
+		self.preview_after_info=tk.StringVar(value=''); ttk.Label(after_frame,textvariable=self.preview_after_info,foreground='gray').grid(row=1,column=0,sticky='we')
+		
+		# 兼容旧属性引用
+		self.preview_label=self.preview_after_label
+		self.preview_info=self.preview_after_info
+		
+		# 自动调整窗口大小选项
+		self.auto_resize_window=tk.BooleanVar(value=True)
+		cb_auto=ttk.Checkbutton(prev,text='随图调高',variable=self.auto_resize_window)
+		cb_auto.grid(row=2,column=0,columnspan=2,sticky='w',pady=(2,0))  # 跨越两列以保持对称
+		self._last_auto_size=None
+		self.auto_resize_window.trace_add('write', lambda *a: self._maybe_resize_window())
+		
+		# 事件绑定
+		self.log.bind('<<TreeviewSelect>>', self._on_select_row)
+		self.log.bind('<Motion>', self._on_log_motion)
 
 	def _build_io_section(self):
 		"""构建输入输出区域"""
-		io_frame = ttk.LabelFrame(self.outer, text="输入输出配置", padding=(8, 6))
+		io_frame = ttk.LabelFrame(self.left_frame, text="输入输出配置", padding=(8, 6))
 		io_frame.pack(fill='x', pady=(0, 8))
 		
 		# 配置列权重
@@ -484,7 +597,7 @@ class ImageToolApp:
 		
 	def _build_skip_formats_section(self):
 		"""构建跳过格式配置区域"""
-		skip_frame = ttk.LabelFrame(self.outer, text='跳过(过滤)格式', padding=(8, 6))
+		skip_frame = ttk.LabelFrame(self.left_frame, text='跳过(过滤)格式', padding=(8, 6))
 		skip_frame.pack(fill='x', pady=(0, 8))
 		
 		# 启用控制行
@@ -535,7 +648,7 @@ class ImageToolApp:
 
 	def _build_functions_section(self):
 		"""构建功能选择区域"""
-		opts_frame = ttk.LabelFrame(self.outer, text="功能配置", padding=(8, 6))
+		opts_frame = ttk.LabelFrame(self.left_frame, text="功能配置", padding=(8, 6))
 		opts_frame.pack(fill='x', pady=(0, 8))
 		
 		# 功能变量初始化
@@ -599,7 +712,7 @@ class ImageToolApp:
 	def _build_classification_section(self):
 		"""构建分类配置区域"""
 		# 比例分类
-		ratio_frame = ttk.LabelFrame(self.outer, text='比例分类', padding=(8, 6))
+		ratio_frame = ttk.LabelFrame(self.left_frame, text='比例分类', padding=(8, 6))
 		ratio_frame.pack(fill='x', pady=(0, 8))
 		self.frame_ratio = ratio_frame
 		ratio_frame.columnconfigure(5, weight=1)
@@ -645,8 +758,8 @@ class ImageToolApp:
 		self._ratio_btn_clear=btn_clear
 		
 		# 形状分类 (新区域)
-		ttk.Separator(self.outer,orient='horizontal').pack(fill='x',pady=(0,4))
-		shape_frame=ttk.LabelFrame(self.outer,text='形状分类'); shape_frame.pack(fill='x',pady=(0,10))
+		ttk.Separator(self.left_frame,orient='horizontal').pack(fill='x',pady=(0,4))
+		shape_frame=ttk.LabelFrame(self.left_frame,text='形状分类'); shape_frame.pack(fill='x',pady=(0,10))
 		self.frame_shape=shape_frame
 		shape_frame.columnconfigure(5,weight=1)
 		
@@ -701,8 +814,8 @@ class ImageToolApp:
 		self._shape_lbl_vertical=lbl_vertical
 		
 		# 转换 (第二阶段)
-		ttk.Separator(self.outer,orient='horizontal').pack(fill='x',pady=(0,4))
-		convert=ttk.LabelFrame(self.outer,text='格式转换'); convert.pack(fill='x',pady=(0,10))
+		ttk.Separator(self.left_frame,orient='horizontal').pack(fill='x',pady=(0,4))
+		convert=ttk.LabelFrame(self.left_frame,text='格式转换'); convert.pack(fill='x',pady=(0,10))
 		self.frame_convert=convert
 		self.fmt_var=tk.StringVar(value=_rev_map(FMT_MAP)['webp'])
 		self.quality_var=tk.IntVar(value=100)
@@ -755,8 +868,8 @@ class ImageToolApp:
 		self.ico_keep_cb=cb_keep; self.ico_custom_entry=ent_ico; self.ico_label=lbl_ico
 		
 		# 去重 (第三阶段)
-		ttk.Separator(self.outer,orient='horizontal').pack(fill='x',pady=(0,4))
-		dedupe=ttk.LabelFrame(self.outer,text='去重设置'); dedupe.pack(fill='x',pady=(0,10))
+		ttk.Separator(self.left_frame,orient='horizontal').pack(fill='x',pady=(0,4))
+		dedupe=ttk.LabelFrame(self.left_frame,text='去重设置'); dedupe.pack(fill='x',pady=(0,10))
 		self.frame_dedupe=dedupe
 		# 去重阈值默认 3
 		self.threshold_var=tk.IntVar(value=3)
@@ -782,8 +895,8 @@ class ImageToolApp:
 		for i in range(8):
 			if i!=3: convert.columnconfigure(i,weight=0)
 		# 重命名
-		ttk.Separator(self.outer,orient='horizontal').pack(fill='x',pady=(0,4))
-		rename=ttk.LabelFrame(self.outer,text='重命名'); rename.pack(fill='x',pady=(0,10))
+		ttk.Separator(self.left_frame,orient='horizontal').pack(fill='x',pady=(0,4))
+		rename=ttk.LabelFrame(self.left_frame,text='重命名'); rename.pack(fill='x',pady=(0,10))
 		self.frame_rename=rename
 		self.pattern_var=tk.StringVar(value='{name}_{index}.{fmt}')
 		self.start_var=tk.IntVar(value=1)
@@ -802,89 +915,25 @@ class ImageToolApp:
 		ttk.Label(rename,text='覆盖策略').grid(row=0,column=8,sticky='e')
 		cb_over=ttk.Combobox(rename,textvariable=self.overwrite_var,values=list(OVERWRITE_MAP.keys()),width=12,state='readonly'); cb_over.grid(row=0,column=9,sticky='w')
 		for i in range(10): rename.columnconfigure(i,weight=0)
-		# 进度
-		ttk.Separator(self.outer,orient='horizontal').pack(fill='x',pady=(0,6))
-		self.progress=ttk.Progressbar(self.outer,maximum=100); self.progress.pack(fill='x',pady=(0,4))
-		self.status_var=tk.StringVar(value='就绪'); ttk.Label(self.outer,textvariable=self.status_var,foreground='blue').pack(fill='x')
-		# 日志
-		ttk.Separator(self.outer,orient='horizontal').pack(fill='x',pady=(4,4))
-		# 日志筛选工具条
-		filter_bar=ttk.Frame(self.outer); filter_bar.pack(fill='x',pady=(0,2))
-		self.log_filter_stage=tk.StringVar(value='全部')
-		self.log_filter_kw=tk.StringVar()
-		self.log_filter_fail=tk.BooleanVar(value=False)
-		ttk.Label(filter_bar,text='筛选:').pack(side='left')
-		cb_stage=ttk.Combobox(filter_bar,width=8,state='readonly',textvariable=self.log_filter_stage,
-			values=['全部','去重','转换','重命名','删除','移动','保留','信息'])
-		cb_stage.pack(side='left',padx=(2,4))
-		ent_kw=ttk.Entry(filter_bar,width=18,textvariable=self.log_filter_kw)
-		ent_kw.pack(side='left');
-		cb_fail=ttk.Checkbutton(filter_bar,text='仅失败',variable=self.log_filter_fail)
-		cb_fail.pack(side='left',padx=(6,0))
-		btn_reset=ttk.Button(filter_bar,text='重置',width=6,command=lambda: self._reset_log_filter())
-		btn_reset.pack(side='right',padx=(4,0))
-		btn_open_log=ttk.Button(filter_bar,text='打开日志',width=8,command=self._open_program_log)
-		btn_open_log.pack(side='right',padx=(4,0))
-		# 绑定变更实时刷新
-		self.log_filter_stage.trace_add('write', self._on_change_log_filter)
-		self.log_filter_kw.trace_add('write', self._on_change_log_filter)
-		self.log_filter_fail.trace_add('write', self._on_change_log_filter)
-		pan=ttk.PanedWindow(self.outer,orient='vertical'); pan.pack(fill='both',expand=True)
-		self.paned=pan  # 保存引用用于自动调整
-		upper=ttk.Frame(pan); lower=ttk.Frame(pan)
-		self.upper_frame=upper; self.lower_frame=lower
-		pan.add(upper,weight=0)
-		pan.add(lower,weight=1)
-		upper.columnconfigure(0,weight=1); upper.rowconfigure(0,weight=1)
-		cols=[('stage','阶段',70),('src','源',260),('dst','目标/组',260),('info','信息',200)]
-		self.log=ttk.Treeview(upper,columns=[c[0] for c in cols],show='headings',height=12)
-		for cid,txt,w in cols: self.log.heading(cid,text=txt); self.log.column(cid,width=w,anchor='w',stretch=True)
-		self.log.grid(row=0,column=0,sticky='nsew')
-		# 阶段着色 (使用 tag 样式)
-		style=ttk.Style(self.root)
-		# 尝试设置浅色背景，兼容浅/深色主题用户可自行调整
-		self.log.tag_configure('STAGE_DEDUPE', background='#FFF5E6')      # 淡橙 去重
-		self.log.tag_configure('STAGE_CONVERT', background='#E6F5FF')     # 淡蓝 转换
-		self.log.tag_configure('STAGE_RENAME', background='#F0E6FF')      # 淡紫 重命名
-		self.log.tag_configure('STAGE_CLASSIFY', background='#E6FFE6')    # 淡绿 分类
-		self.log.tag_configure('STAGE_DELETE', background='#FFE6E6')      # 淡红 删除
-		self.log.tag_configure('STAGE_MOVE', background='#E6FFE6')        # 淡绿 移动
-		self.log.tag_configure('STAGE_KEEP', background='#F5F5F5')        # 灰白 保留
-		self.log.tag_configure('STAGE_INFO', background='#EEEEEE')        # 信息行
-		vsb=ttk.Scrollbar(upper,orient='vertical',command=self.log.yview); vsb.grid(row=0,column=1,sticky='ns')
-		hsb=ttk.Scrollbar(upper,orient='horizontal',command=self.log.xview); hsb.grid(row=1,column=0,sticky='we')
-		self.log.configure(yscrollcommand=vsb.set,xscrollcommand=hsb.set)
-		lower.columnconfigure(0,weight=1); lower.rowconfigure(0,weight=1)
-		prev=ttk.LabelFrame(lower,text='预览 (前后对比)'); prev.pack(fill='both',expand=True)
-		for i in range(2): prev.columnconfigure(i,weight=1)
-		prev.rowconfigure(0,weight=1)
-		# BEFORE
-		before_frame=ttk.Frame(prev,padding=2); before_frame.grid(row=0,column=0,sticky='nsew')
-		before_frame.columnconfigure(0,weight=1)
-		before_frame.rowconfigure(0,weight=1)
-		self.preview_before_label=ttk.Label(before_frame,text='(源)'); self.preview_before_label.grid(row=0,column=0,sticky='n')
-		self.preview_before_info=tk.StringVar(value=''); ttk.Label(before_frame,textvariable=self.preview_before_info,foreground='gray').grid(row=1,column=0,sticky='we')
-		# AFTER
-		after_frame=ttk.Frame(prev,padding=2); after_frame.grid(row=0,column=1,sticky='nsew')
-		after_frame.columnconfigure(0,weight=1)
-		after_frame.rowconfigure(0,weight=1)
-		self.preview_after_label=ttk.Label(after_frame,text='(结果)'); self.preview_after_label.grid(row=0,column=0,sticky='n')
-		self.preview_after_info=tk.StringVar(value=''); ttk.Label(after_frame,textvariable=self.preview_after_info,foreground='gray').grid(row=1,column=0,sticky='we')
-		# 兼容旧属性引用
-		self.preview_label=self.preview_after_label
-		self.preview_info=self.preview_after_info
-		# 自动调整窗口大小选项
-		self.auto_resize_window=tk.BooleanVar(value=True)
-		cb_auto=ttk.Checkbutton(prev,text='随图调高',variable=self.auto_resize_window)
-		cb_auto.grid(row=2,column=0,columnspan=2,sticky='w',pady=(2,0))  # 跨越两列以保持对称
-		self._last_auto_size=None
-		self.auto_resize_window.trace_add('write', lambda *a: self._maybe_resize_window())
-		# 事件
-		self.log.bind('<<TreeviewSelect>>', self._on_select_row)
-		self.log.bind('<Motion>', self._on_log_motion)
+		# 进度状态显示
+		ttk.Separator(self.left_frame,orient='horizontal').pack(fill='x',pady=(0,6))
+		self.progress=ttk.Progressbar(self.left_frame,maximum=100); self.progress.pack(fill='x',pady=(0,4))
+		self.status_var=tk.StringVar(value='就绪'); ttk.Label(self.left_frame,textvariable=self.status_var,foreground='blue').pack(fill='x')
+		
+		# 设置变量跟踪
+		self.classify_ratio_var.trace_add('write', lambda *a: self._update_states())
+		self.classify_shape_var.trace_add('write', lambda *a: self._update_states())
+		self.dedup_action_var.trace_add('write', lambda *a: self._update_states())
+		self.fmt_var.trace_add('write', lambda *a: self._update_states())
+		
+		# 基本变量跟踪
 		self.enable_convert.trace_add('write', lambda *a: self._update_states())
 		self.enable_rename.trace_add('write', lambda *a: self._update_states())
 		self.enable_dedupe.trace_add('write', lambda *a: self._update_states())
+		
+		# 原始日志缓存 (用于筛选)
+		self._raw_logs=[]  # list of tuples (stage, src_full, dst_full, info, display_values, tags)
+		
 		# 记录基础窗口最小尺寸
 		try:
 			self.root.update_idletasks(); self._base_win_width=self.root.winfo_width(); self._base_win_height=self.root.winfo_height()
