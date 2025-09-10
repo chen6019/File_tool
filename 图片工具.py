@@ -1058,6 +1058,8 @@ class ImageToolApp:
 		cb_fail.pack(side='left',padx=(6,0))
 		btn_reset=ttk.Button(filter_bar,text='重置',width=6,command=lambda: self._reset_log_filter())
 		btn_reset.pack(side='right',padx=(4,0))
+		btn_clear_log=ttk.Button(filter_bar,text='清空',width=6,command=self._clear_log)
+		btn_clear_log.pack(side='right',padx=(4,0))
 		btn_open_log=ttk.Button(filter_bar,text='打开日志',width=8,command=self._open_program_log)
 		btn_open_log.pack(side='right',padx=(4,0))
 		# 绑定变更实时刷新
@@ -3757,6 +3759,69 @@ class ImageToolApp:
 		if hasattr(self,'log_filter_kw'): self.log_filter_kw.set('')
 		if hasattr(self,'log_filter_fail'): self.log_filter_fail.set(False)
 		self._on_change_log_filter()
+
+	def _clear_log(self):
+		"""
+		清空日志记录
+		
+		清除所有日志条目，包括原始日志数据和显示的日志表格。
+		提供确认对话框避免误操作。
+		"""
+		# 显示确认对话框
+		result = messagebox.askyesno(
+			"确认清空", 
+			"确定要清空所有日志记录吗？\n此操作不可撤销。",
+			parent=self.root
+		)
+		
+		if not result:
+			return  # 用户取消操作
+		
+		try:
+			# 清空原始日志数据
+			if hasattr(self, '_raw_logs'):
+				self._raw_logs.clear()
+			
+			# 清空显示的日志表格
+			if hasattr(self, 'log'):
+				# 删除所有子项
+				for item in self.log.get_children():
+					self.log.delete(item)
+			
+			# 清空预览显示
+			self._clear_preview()
+			
+			# 重置过滤器
+			if hasattr(self,'log_filter_stage'): self.log_filter_stage.set('全部')
+			if hasattr(self,'log_filter_kw'): self.log_filter_kw.set('')
+			if hasattr(self,'log_filter_fail'): self.log_filter_fail.set(False)
+			
+			print("日志已清空")
+		except Exception as e:
+			print(f"清空日志时出错: {e}")
+			messagebox.showerror("错误", f"清空日志时出错: {e}", parent=self.root)
+
+	def _clear_preview(self):
+		"""
+		清空预览区域
+		"""
+		try:
+			# 清空预览图片
+			if hasattr(self, 'preview_before_label'):
+				self.preview_before_label.configure(image='', text='')
+				self.preview_before_label._img_ref = None
+				self.preview_before_label._text_mode = False
+			
+			if hasattr(self, 'preview_after_label'):
+				self.preview_after_label.configure(image='', text='')
+				self.preview_after_label._img_ref = None
+				self.preview_after_label._text_mode = False
+			
+			# 清空预览信息
+			if hasattr(self, 'preview_info_label'):
+				self.preview_info_label.configure(text='')
+		except Exception as e:
+			print(f"清空预览时出错: {e}")
 
 	def _on_classify_ratio_changed(self):
 		"""
