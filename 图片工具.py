@@ -656,7 +656,15 @@ class ImageToolApp:
 
 	# ---------------- UI 构建 ----------------
 	def _build(self):
-		"""构建主界面"""
+		"""
+		构建主界面布局
+		
+		创建左右分栏的主界面：
+		- 左侧：配置选项面板（输入输出、功能选择、格式转换等）
+		- 右侧：日志显示和图片预览面板
+		
+		使用ttk.PanedWindow实现可调节的分栏布局，用户可以拖拽调整比例。
+		"""
 		# 主容器
 		self.outer = ttk.Frame(self.root, padding=(10, 8, 10, 8))
 		self.outer.pack(fill='both', expand=True)
@@ -683,7 +691,17 @@ class ImageToolApp:
 		self._setup_tooltips()
 
 	def _build_config_sections(self):
-		"""构建左侧配置区域"""
+		"""
+		构建左侧配置区域的所有功能模块
+		
+		按顺序创建以下配置区域：
+		1. 输入输出目录设置
+		2. 跳过格式选择
+		3. 功能选择（去重、转换、重命名、分类）
+		4. 分类设置选项
+		
+		所有配置项都放置在左侧框架中，采用垂直布局。
+		"""
 		# 按功能区域构建界面
 		self._build_io_section()
 		self._build_skip_formats_section()
@@ -1341,6 +1359,21 @@ class ImageToolApp:
 			return None
 
 	def _start(self, write_to_output:bool=True):
+		"""
+		启动图片处理任务
+		
+		这是所有处理功能的统一入口点，负责：
+		1. 检查任务状态，防止重复运行
+		2. 清理缓存和重置状态
+		3. 验证输入输出路径
+		4. 启动后台工作线程
+		5. 根据选择的功能执行相应处理
+		
+		Args:
+			write_to_output (bool): 是否写入最终输出目录
+				- True: 正式处理模式，结果写入指定输出目录
+				- False: 预览模式，结果写入临时缓存目录
+		"""
 		if self.worker and self.worker.is_alive():
 			messagebox.showinfo('提示','任务运行中'); return
 		self.write_to_output=write_to_output
