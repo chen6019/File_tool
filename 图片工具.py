@@ -300,7 +300,7 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 	- JPG转换时自动处理透明通道（转为白色背景）
 	- ICO转换时支持多种尺寸和方形处理模式
 	- GIF保持动画帧
-	- WebP和JPG支持质量控制
+	- WebP支持动画帧和质量控制（自动检测动画图片）
 	- PNG支持调色板模式
 	
 	Args:
@@ -356,6 +356,16 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 						im=im.convert('P',palette=Image.ADAPTIVE,colors=256)
 				elif fmt=='webp':
 					params['quality']=quality or 80
+					# 对于动画图片（如GIF转WebP），需要保存所有帧
+					if hasattr(im, 'is_animated') and im.is_animated:
+						params['save_all'] = True
+						# 尝试保留动画的时间间隔信息
+						try:
+							# 获取原始动画的持续时间信息
+							if hasattr(im, 'info') and 'duration' in im.info:
+								params['duration'] = im.info['duration']
+						except Exception:
+							pass  # 如果获取持续时间失败，使用默认值
 				# 修复Pillow格式名称映射
 				pillow_fmt = fmt.upper()
 				if pillow_fmt == 'JPG':
