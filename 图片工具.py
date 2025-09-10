@@ -299,16 +299,16 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 	支持多种图片格式转换，包括特殊处理逻辑：
 	- JPG转换时自动处理透明通道（转为白色背景）
 	- ICO转换时支持多种尺寸和方形处理模式
-	- GIF保持动画帧
-	- WebP支持动画帧和质量控制（自动检测动画图片）
-	- PNG支持调色板模式
+	- GIF保持动画帧、持续时间和循环信息
+	- WebP支持动画帧、质量控制和循环信息（自动检测动画图片）
+	- PNG支持调色板模式和APNG动画格式（保持动画帧和时间信息）
 	
 	Args:
 		src (str): 源文件路径
 		dst (str): 目标文件路径
 		fmt (str): 目标格式 ('jpg', 'png', 'webp', 'ico', 'gif')
 		quality (int, optional): 压缩质量 (1-100)，适用于JPG和WebP
-		png3 (bool): 是否将PNG转换为调色板模式以减小文件大小
+		png3 (bool): 是否将PNG转换为调色板模式以减小文件大小（不适用于APNG）
 		ico_sizes (list, optional): ICO图标尺寸列表，如 [16, 32, 48]
 		square_mode (str, optional): ICO方形处理模式
 			- 'center': 居中裁剪为方形
@@ -320,6 +320,10 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 		tuple: (是否成功, 结果描述)
 			- (True, 'OK') - 转换成功
 			- (False, 错误信息) - 转换失败，包含详细错误信息
+			
+	Note:
+		支持的动画格式互转：GIF ↔ WebP ↔ APNG
+		动画转换时会尝试保持原始的帧数、持续时间和循环设置
 	"""
 	try:
 		with Image.open(src) as im:  # type: ignore
@@ -337,8 +341,23 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 						x=(side-w)//2; y=(side-h)//2
 						canvas.paste(im,(x,y))
 						im=canvas
+			# 检测是否为动画图片
+			is_animated = hasattr(im, 'is_animated') and im.is_animated
+			
 			if fmt=='gif':
-				im.save(dst,save_all=True)
+				# GIF格式：保持动画和循环信息
+				save_params = {'save_all': True} if is_animated else {}
+				if is_animated:
+					# 保留原始动画的持续时间和循环信息
+					try:
+						if hasattr(im, 'info'):
+							if 'duration' in im.info:
+								save_params['duration'] = im.info['duration']
+							if 'loop' in im.info:
+								save_params['loop'] = im.info['loop']
+					except Exception:
+						pass
+				im.save(dst, **save_params)
 			elif fmt=='ico':
 				im.save(dst, sizes=[(s,s) for s in (ico_sizes or [256])])
 			else:
@@ -352,20 +371,34 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 					else:
 						im=im.convert('RGB')
 				elif fmt=='png':
-					if png3:
+					# PNG格式：支持APNG（动画PNG）
+					if is_animated:
+						params['save_all'] = True
+						# 保留动画信息
+						try:
+							if hasattr(im, 'info'):
+								if 'duration' in im.info:
+									params['duration'] = im.info['duration']
+								if 'loop' in im.info:
+									params['loop'] = im.info['loop']
+						except Exception:
+							pass
+					elif png3:
 						im=im.convert('P',palette=Image.ADAPTIVE,colors=256)
 				elif fmt=='webp':
 					params['quality']=quality or 80
-					# 对于动画图片（如GIF转WebP），需要保存所有帧
-					if hasattr(im, 'is_animated') and im.is_animated:
+					# WebP格式：支持动画
+					if is_animated:
 						params['save_all'] = True
-						# 尝试保留动画的时间间隔信息
+						# 保留动画的时间间隔和循环信息
 						try:
-							# 获取原始动画的持续时间信息
-							if hasattr(im, 'info') and 'duration' in im.info:
-								params['duration'] = im.info['duration']
+							if hasattr(im, 'info'):
+								if 'duration' in im.info:
+									params['duration'] = im.info['duration']
+								if 'loop' in im.info:
+									params['loop'] = im.info['loop']
 						except Exception:
-							pass  # 如果获取持续时间失败，使用默认值
+							pass
 				# 修复Pillow格式名称映射
 				pillow_fmt = fmt.upper()
 				if pillow_fmt == 'JPG':
