@@ -1223,8 +1223,8 @@ class ImageToolApp:
 		self.status_var=tk.StringVar(value='就绪'); ttk.Label(self.left_frame,textvariable=self.status_var,foreground='blue').pack(fill='x')
 		
 		# 设置变量跟踪
-		self.classify_ratio_var.trace_add('write', lambda *a: self._update_states())
-		self.classify_shape_var.trace_add('write', lambda *a: self._update_states())
+		self.classify_ratio_var.trace_add('write', lambda *a: self._on_classify_ratio_changed())
+		self.classify_shape_var.trace_add('write', lambda *a: self._on_classify_shape_changed())
 		self.dedup_action_var.trace_add('write', lambda *a: self._update_states())
 		self.fmt_var.trace_add('write', lambda *a: self._update_states())
 		
@@ -3409,6 +3409,30 @@ class ImageToolApp:
 		if hasattr(self,'log_filter_kw'): self.log_filter_kw.set('')
 		if hasattr(self,'log_filter_fail'): self.log_filter_fail.set(False)
 		self._on_change_log_filter()
+
+	def _on_classify_ratio_changed(self):
+		"""
+		处理比例分类选项变化
+		
+		当比例分类被启用时，自动禁用形状分类以确保互斥
+		"""
+		if self.classify_ratio_var.get():
+			# 如果比例分类被启用，禁用形状分类
+			if self.classify_shape_var.get():
+				self.classify_shape_var.set(False)
+		self._update_states()
+	
+	def _on_classify_shape_changed(self):
+		"""
+		处理形状分类选项变化
+		
+		当形状分类被启用时，自动禁用比例分类以确保互斥
+		"""
+		if self.classify_shape_var.get():
+			# 如果形状分类被启用，禁用比例分类
+			if self.classify_ratio_var.get():
+				self.classify_ratio_var.set(False)
+		self._update_states()
 
 	def _update_states(self):
 		# 去重区
