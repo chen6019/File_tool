@@ -426,7 +426,7 @@ class ImageToolApp:
 		self.classify_ratio_var=tk.BooleanVar(value=False)
 		# 形状分类配置
 		self.classify_shape_var=tk.BooleanVar(value=False)
-		self.shape_tolerance_var=tk.DoubleVar(value=0.05)  # 方形容差，默认5%
+		self.shape_tolerance_var=tk.DoubleVar(value=0.15)  # 方形容差，默认15%
 		self.shape_square_name=tk.StringVar(value='zfx')  # 方形文件夹名
 		self.shape_horizontal_name=tk.StringVar(value='hp')  # 横向文件夹名
 		self.shape_vertical_name=tk.StringVar(value='sp')  # 纵向文件夹名
@@ -535,7 +535,7 @@ class ImageToolApp:
 			command=lambda: [self.shape_square_name.set('zfx'),
 							self.shape_horizontal_name.set('hp'),
 							self.shape_vertical_name.set('sp'),
-							self.shape_tolerance_var.set(0.05)])
+							self.shape_tolerance_var.set(0.15)])
 		btn_reset_shape.pack(side='left',padx=(8,0))
 		
 		# 保存引用供后续状态控制
