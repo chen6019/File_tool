@@ -79,6 +79,15 @@ OVERWRITE_MAP = {
 	'自动改名': 'rename',
 }
 
+# 动图压缩方法映射
+WEBP_COMPRESSION_MAP = {
+	'自动选择': 'auto',
+	'无损压缩': 'lossless',
+	'高质量': 'high_quality', 
+	'标准压缩': 'standard',
+	'快速压缩': 'fast',
+}
+
 # 日志阶段显示映射
 STAGE_MAP_DISPLAY = {
 	'DEDUP': '去重',
@@ -98,6 +107,81 @@ def _rev_map(mp:dict):
 		dict: 反向映射字典 {value: key}
 	"""
 	return {v:k for k,v in mp.items()}
+
+def get_webp_params(compression_method, quality, original_frames, file_size, conservative_mode):
+	"""
+	根据压缩方法和文件特征获取WebP压缩参数
+	
+	Args:
+		compression_method (str): 压缩方法 ('auto', 'lossless', 'high_quality', 'standard', 'fast')
+		quality (int): 用户设定的质量值
+		original_frames (int): 原始帧数
+		file_size (int): 文件大小（字节）
+		conservative_mode (bool): 是否使用保守模式
+		
+	Returns:
+		dict: WebP压缩参数
+	"""
+	params = {'quality': quality or 80}
+	
+	if compression_method == 'lossless':
+		# 无损压缩
+		params.update({
+			'lossless': True,
+			'method': 6,  # 最佳压缩方法
+			'exact': True
+		})
+	elif compression_method == 'high_quality':
+		# 高质量压缩
+		params.update({
+			'quality': 100,
+			'method': 6,
+			'lossless': False,
+			'exact': True
+		})
+	elif compression_method == 'fast':
+		# 快速压缩
+		params.update({
+			'quality': max(70, quality or 80),
+			'method': 0,  # 最快方法
+			'lossless': False
+		})
+	elif compression_method == 'standard':
+		# 标准压缩
+		params.update({
+			'quality': quality or 80,
+			'method': 4,  # 平衡方法
+			'lossless': False
+		})
+	elif compression_method == 'auto':
+		# 自动选择（原有逻辑）
+		if original_frames > 100 or file_size > 10*1024*1024:
+			params.update({
+				'lossless': True,
+				'method': 6,
+				'exact': True
+			})
+		elif original_frames > 50:
+			params.update({
+				'quality': 100,
+				'method': 6,
+				'lossless': False,
+				'exact': True
+			})
+		else:
+			params.update({
+				'quality': quality or 80,
+				'method': 4,
+				'lossless': False
+			})
+	
+	# 通用动画参数
+	params.update({
+		'save_all': True,
+		'minimize_size': False  # 确保帧完整性
+	})
+	
+	return params
 
 def iter_images(root:str, recursive:bool, skip_formats:set=None) -> Iterable[str]:
 	"""
@@ -292,7 +376,7 @@ def _fmt_size(n:int)->str:
 		f/=1024; i+=1
 	return (f'{f:.2f}{units[i]}' if i>0 else f'{int(f)}{units[i]}')
 
-def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=None):
+def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=None,webp_compression='auto'):
 	"""
 	转换单个图片文件格式
 	
@@ -315,6 +399,12 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 			- 'topleft': 左上角裁剪为方形  
 			- 'fit': 填充为方形（保持原图完整）
 			- 'keep': 保持原始比例
+		webp_compression (str): WebP压缩方法
+			- 'auto': 自动选择（默认）
+			- 'lossless': 无损压缩
+			- 'high_quality': 高质量压缩
+			- 'standard': 标准压缩
+			- 'fast': 快速压缩
 			
 	Returns:
 		tuple: (是否成功, 结果描述)
@@ -325,6 +415,7 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 		支持的动画格式互转：GIF ↔ WebP ↔ APNG
 		动画转换时会尝试保持原始的帧数、持续时间和循环设置
 		针对大文件和高帧数动画进行了优化，包含帧数验证机制
+		当帧数不一致时会自动尝试其他压缩方法
 	"""
 	import os
 	import psutil
@@ -425,54 +516,128 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 						im=im.convert('P',palette=Image.ADAPTIVE,colors=256)
 						
 				elif fmt=='webp':
-					params['quality']=quality or 80
-					
-					# WebP格式：支持动画
+					# WebP格式：支持动画和多种压缩方法
 					if is_animated:
-						params['save_all'] = True
-						params['minimize_size'] = False  # 不优化文件大小，确保帧完整性
+						# 定义备用压缩方法顺序（按安全性和效果排序）
+						fallback_methods = ['lossless', 'high_quality', 'standard', 'fast']
 						
-						# 根据帧数和文件大小选择最佳的WebP编码策略
-						# 通过测试发现：WebP在某些参数组合下会丢失帧数
-						# 安全策略：对于中高帧数都使用无损或接近无损的设置
-						
-						if original_frames > 100 or file_size > 10*1024*1024:  # >100帧或>10MB
-							# 使用无损压缩确保帧完整性
-							params['lossless'] = True
-							params['method'] = 6  # 最佳压缩方法
-							params['exact'] = True  # 精确模式
-							print(f"使用WebP无损压缩处理{original_frames}帧动画")
-						elif original_frames > 50:
-							# 中等帧数：使用接近无损的高质量压缩
-							params['quality'] = 100  # 最高质量
-							params['method'] = 6     # 最佳方法
-							params['lossless'] = False
-							params['exact'] = True   # 精确模式
-							print(f"使用WebP最高质量压缩处理{original_frames}帧动画")
+						# 如果用户选择了具体方法，先尝试该方法
+						if webp_compression != 'auto' and webp_compression in fallback_methods:
+							methods_to_try = [webp_compression] + [m for m in fallback_methods if m != webp_compression]
 						else:
-							# 低帧数：使用标准压缩
-							params['method'] = 4  # 平衡的压缩方法
-							params['quality'] = params['quality']  # 保持用户设定的质量
+							# 自动模式或无效方法，使用默认顺序
+							methods_to_try = ['auto'] + fallback_methods
 						
-						# 保留动画的时间间隔和循环信息
-						try:
-							if hasattr(im, 'info'):
-								if 'duration' in im.info:
-									duration = im.info['duration']
-									if isinstance(duration, (list, tuple)):
-										params['duration'] = duration
+						success = False
+						last_error = None
+						
+						for method in methods_to_try:
+							try:
+								params = get_webp_params(method, quality, original_frames, file_size, conservative_mode)
+								
+								# 保留动画的时间间隔和循环信息
+								try:
+									if hasattr(im, 'info'):
+										if 'duration' in im.info:
+											duration = im.info['duration']
+											if isinstance(duration, (list, tuple)):
+												params['duration'] = duration
+											else:
+												params['duration'] = max(1, int(duration))
+										if 'loop' in im.info:
+											params['loop'] = im.info['loop']
+								except Exception:
+									pass
+								
+								# 尝试保存
+								im.save(dst, 'WEBP', **params)
+								
+								# 验证帧数
+								with Image.open(dst) as result_im:
+									result_frames = getattr(result_im, 'n_frames', 1) if getattr(result_im, 'is_animated', False) else 1
+									
+									if result_frames == original_frames:
+										method_name = {
+											'auto': '自动选择',
+											'lossless': '无损压缩', 
+											'high_quality': '高质量',
+											'standard': '标准压缩',
+											'fast': '快速压缩'
+										}.get(method, method)
+										
+										print(f"WebP转换成功: 使用{method_name}方法，保持{original_frames}帧")
+										success = True
+										break
 									else:
-										params['duration'] = max(1, int(duration))  # 确保至少1ms
-								if 'loop' in im.info:
-									params['loop'] = im.info['loop']
-						except Exception:
-							pass
+										print(f"WebP {method}方法帧数不一致: {original_frames} -> {result_frames}，尝试下一种方法")
+										last_error = f"帧数不一致: 原始{original_frames}帧 -> 结果{result_frames}帧"
+										
+							except Exception as e:
+								print(f"WebP {method}方法失败: {e}，尝试下一种方法")
+								last_error = str(e)
+								continue
+						
+						if not success:
+							# 所有WebP方法都失败，尝试手动帧处理作为最后的努力
+							print(f"WebP方法都失败，尝试手动帧处理...")
+							try:
+								# 手动收集所有帧
+								from PIL import ImageSequence
+								frames = []
+								durations = []
+								
+								for frame in ImageSequence.Iterator(im):
+									# 转换为RGB避免模式问题
+									if frame.mode != 'RGB':
+										frame_rgb = frame.convert('RGB')
+									else:
+										frame_rgb = frame.copy()
+									frames.append(frame_rgb)
+									
+									# 修复持续时间
+									duration = frame.info.get('duration', 100)
+									durations.append(max(duration, 1))
+								
+								# 如果收集的帧数正确，尝试手动保存
+								if len(frames) == original_frames:
+									frames[0].save(
+										dst,
+										'WEBP',
+										save_all=True,
+										append_images=frames[1:],
+										duration=100,  # 使用固定持续时间
+										loop=0,
+										lossless=True,
+										method=6
+									)
+									
+									# 再次验证
+									with Image.open(dst) as result_im:
+										result_frames = getattr(result_im, 'n_frames', 1)
+										if result_frames == original_frames:
+											print(f"手动帧处理成功: {original_frames}帧")
+											success = True
+										else:
+											print(f"手动帧处理仍有问题: {original_frames} -> {result_frames}")
+								
+							except Exception as manual_error:
+								print(f"手动帧处理失败: {manual_error}")
+							
+							if not success:
+								# 最终备用方案：提示用户WebP可能不适合此文件
+								return False, f"WebP转换失败(尝试了所有方法): {last_error}。建议改用PNG(APNG)或GIF格式"
+							
+					else:
+						# 静态图片
+						params = {'quality': quality or 80}
+						im.save(dst, 'WEBP', **params)
 				
-				# 修复Pillow格式名称映射
-				pillow_fmt = fmt.upper()
-				if pillow_fmt == 'JPG':
-					pillow_fmt = 'JPEG'
-				im.save(dst, pillow_fmt, **params)
+				# 修复Pillow格式名称映射并保存（非WebP动画）
+				if not (fmt == 'webp' and is_animated):
+					pillow_fmt = fmt.upper()
+					if pillow_fmt == 'JPG':
+						pillow_fmt = 'JPEG'
+					im.save(dst, pillow_fmt, **params)
 		
 		# 验证转换结果的帧数（仅对动画）
 		if is_animated and original_frames > 1:
@@ -1211,6 +1376,8 @@ class ImageToolApp:
 		self.quality_var=tk.IntVar(value=100)
 		self.process_same_var=tk.BooleanVar(value=False)
 		self.png3_var=tk.BooleanVar(value=False)
+		# 动图压缩方法选择
+		self.webp_compression_var=tk.StringVar(value=_rev_map(WEBP_COMPRESSION_MAP)['auto'])
 		# 默认转换后删源
 		self.ico_sizes_var=tk.StringVar(value='')  # 自定义尺寸输入
 		self.ico_keep_orig=tk.BooleanVar(value=False)
@@ -1228,18 +1395,25 @@ class ImageToolApp:
 		self.cb_same = cb_same  # 保存引用用于tooltip
 		cb_png3=ttk.Checkbutton(convert,text='PNG3压缩',variable=self.png3_var); cb_png3.grid(row=0,column=6,sticky='w')
 		self.cb_png3 = cb_png3  # 保存引用用于tooltip
-		# ICO 尺寸输入 (仅当选择 ico 有效)
+		
+		# 第二行：动图压缩方法
+		ttk.Label(convert,text='动图压缩').grid(row=1,column=0,sticky='e',pady=(4,0))
+		cb_webp_comp=ttk.Combobox(convert,textvariable=self.webp_compression_var,values=list(WEBP_COMPRESSION_MAP.keys()),width=12,state='readonly')
+		cb_webp_comp.grid(row=1,column=1,sticky='w',padx=(0,12),pady=(4,0))
+		self.cb_webp_comp = cb_webp_comp  # 保存引用用于tooltip
+		
+		# ICO 尺寸输入 (仅当选择 ico 有效) - 移到第三行
 		lbl_ico=ttk.Label(convert,text='ICO尺寸')
 		ent_ico=ttk.Entry(convert,textvariable=self.ico_sizes_var,width=22)
 		self.ent_ico = ent_ico  # 保存引用用于tooltip
-		lbl_ico.grid(row=1,column=0,sticky='e',pady=(4,0))
-		ent_ico.grid(row=1,column=1,sticky='w',pady=(4,0))
+		lbl_ico.grid(row=2,column=0,sticky='e',pady=(4,0))
+		ent_ico.grid(row=2,column=1,sticky='w',pady=(4,0))
 		# 复选框区域
 		ico_box=ttk.Frame(convert)
-		ico_box.grid(row=1,column=2,columnspan=5,sticky='w',pady=(4,0))
+		ico_box.grid(row=2,column=2,columnspan=5,sticky='w',pady=(4,0))
 		# 非方图处理方式
 		frame_sq=ttk.Frame(convert)
-		frame_sq.grid(row=2,column=0,columnspan=8,sticky='w',pady=(2,2))
+		frame_sq.grid(row=3,column=0,columnspan=8,sticky='w',pady=(2,2))
 		ttk.Label(frame_sq,text='非方图:').pack(side='left')
 		sq_choices=[('保持','keep'),('中心裁切','center'),('左上裁切','topleft'),('等比例填充','fit')]
 		for txt,val in sq_choices:
@@ -1356,6 +1530,8 @@ class ImageToolApp:
 				(self.cb_fmt,'目标格式'),(self.sc_q,'拖动调整质量'),(self.sp_q,'直接输入质量 1-100'),(self.cb_same,'同格式也重新编码'),(self.cb_png3,'PNG 高压缩'),
 				(self.ent_ico,'ICO 自定义尺寸: 逗号/空格分隔 例如 24,40'),
 			])
+		if hasattr(self, 'cb_webp_comp'):
+			tips.append((self.cb_webp_comp,'动图WebP压缩方法：自动选择会根据帧数自动调整，转换失败时会自动尝试其他方法'))
 		# 跳过格式提示
 		if hasattr(self, 'skip_enable_cb'):
 			tips.append((self.skip_enable_cb,'启用格式跳过功能，基于文件实际格式而非扩展名'))
@@ -2283,6 +2459,7 @@ class ImageToolApp:
 				self.q.put(f'STATUS 未知格式 "{fmt_key}"，使用PNG作为默认格式')
 		
 		process_same=self.process_same_var.get(); quality=self.quality_var.get(); png3=self.png3_var.get()
+		webp_compression = WEBP_COMPRESSION_MAP.get(self.webp_compression_var.get(), 'auto')
 		pattern=self.pattern_var.get(); start=self.start_var.get(); step=self.step_var.get()
 		overwrite=OVERWRITE_MAP.get(self.overwrite_var.get(),'overwrite')
 		ico_sizes=None
@@ -2430,13 +2607,13 @@ class ImageToolApp:
 			if need_convert:
 				if not self.write_to_output:
 					# 实际执行一次到缓存，保证可预览
-					ok_convert,msg_convert=convert_one(src,convert_path,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False, ico_sizes if tgt=='ico' else None, self.ico_square_mode_code() if tgt=='ico' else None)
+					ok_convert,msg_convert=convert_one(src,convert_path,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False, ico_sizes if tgt=='ico' else None, self.ico_square_mode_code() if tgt=='ico' else None, webp_compression if tgt=='webp' else 'auto')
 					if ok_convert:
 						msg_convert = '转换(预览)'
 					else:
 						msg_convert = f'转换失败(预览):{msg_convert}'
 				else:
-					ok_convert,msg_convert=convert_one(src,convert_path,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False, ico_sizes if tgt=='ico' else None, self.ico_square_mode_code() if tgt=='ico' else None)
+					ok_convert,msg_convert=convert_one(src,convert_path,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False, ico_sizes if tgt=='ico' else None, self.ico_square_mode_code() if tgt=='ico' else None, webp_compression if tgt=='webp' else 'auto')
 					if not ok_convert:
 						msg_convert = f'转换失败:{msg_convert}'
 						# 转换失败时：处理失败文件
@@ -2837,6 +3014,7 @@ class ImageToolApp:
 				self.q.put(f'STATUS 未知格式 "{fmt_key}"，使用PNG作为默认格式')
 		
 		process_same=self.process_same_var.get(); quality=self.quality_var.get(); png3=self.png3_var.get()
+		webp_compression = WEBP_COMPRESSION_MAP.get(self.webp_compression_var.get(), 'auto')
 		workers=max(1,self.workers_var.get())
 		real_out=self.out_var.get().strip() or self.in_var.get().strip()
 		
@@ -2920,7 +3098,7 @@ class ImageToolApp:
 			try: os.makedirs(dest_dir, exist_ok=True)
 			except Exception: pass
 			dest=os.path.join(dest_dir,out_name)
-			ok,msg=convert_one(f,dest,tgt_fmt,quality if tgt_fmt in ('jpg','png','webp') else None,png3 if tgt_fmt=='png' else False,ico_sizes if tgt_fmt=='ico' else None,self.ico_square_mode_code() if tgt_fmt=='ico' else None)
+			ok,msg=convert_one(f,dest,tgt_fmt,quality if tgt_fmt in ('jpg','png','webp') else None,png3 if tgt_fmt=='png' else False,ico_sizes if tgt_fmt=='ico' else None,self.ico_square_mode_code() if tgt_fmt=='ico' else None, webp_compression if tgt_fmt=='webp' else 'auto')
 			with lock:
 				if ok:
 					self.q.put(f'LOG\tCONVERT\t{f}\t{dest}\t转换')
