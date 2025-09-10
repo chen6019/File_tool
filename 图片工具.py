@@ -1052,6 +1052,13 @@ class ImageToolApp:
 		if not any(self.stats[key] > 0 for key in ['converted_files', 'renamed_files', 'classified_files', 'dedupe_removed']):
 			report_lines.append("  无特殊操作")
 		
+		# 添加输出目录处理信息
+		if self.write_to_output:
+			if self.clear_output_var.get():
+				report_lines.append("  输出目录: 已清空")
+			else:
+				report_lines.append("  输出目录: 与现有文件混合")
+		
 		# 文件格式分布
 		if self.stats['file_formats']:
 			report_lines.extend([
@@ -1404,6 +1411,11 @@ class ImageToolApp:
 		btn_open_out = ttk.Button(io_frame, text='打开', command=self._open_last_out, width=6)
 		btn_open_out.grid(row=1, column=3, padx=(0, 0), pady=(8, 0))
 		
+		# 清空输出目录选项
+		self.clear_output_var = tk.BooleanVar(value=True)  # 默认清空
+		cb_clear_output = ttk.Checkbutton(io_frame, text='清空输出目录', variable=self.clear_output_var)
+		cb_clear_output.grid(row=1, column=4, sticky='w', pady=(8, 0), padx=(8, 0))
+		
 		# 保存引用供tooltip使用
 		self.ent_in = ent_in
 		self.btn_in = btn_in
@@ -1412,6 +1424,7 @@ class ImageToolApp:
 		self.ent_out = ent_out
 		self.btn_out = btn_out
 		self.btn_open_out = btn_open_out
+		self.cb_clear_output = cb_clear_output
 		
 	def _build_skip_formats_section(self):
 		"""构建跳过格式配置区域"""
@@ -1777,7 +1790,7 @@ class ImageToolApp:
 		# tooltips
 		tips=[
 			(self.ent_in,'输入目录/文件 (支持常见图片)'),(self.btn_in,'选择输入目录'),(self.btn_in_file,'选择单个图片文件'),(self.cb_rec,'是否递归子目录 (单文件时忽略)'),
-			(self.ent_out,'输出目录 (留空=跟随输入目录或文件所在目录)'),(self.btn_out,'选择输出目录'),(self.btn_open_out,'打开输出目录'),
+			(self.ent_out,'输出目录 (留空=跟随输入目录或文件所在目录)'),(self.btn_out,'选择输出目录'),(self.btn_open_out,'打开输出目录'),(self.cb_clear_output,'处理前是否清空输出目录，取消勾选将与现有文件混合'),
 			(self.cb_classify,'按比例分类：根据自定义比例列表创建子目录，支持容差和吸附设置'),(self.cb_shape,'按形状分类：将图片按横向(宽>高)、纵向(高>宽)、方形(宽≈高)分类，支持自定义容差和文件夹名称'),
 			(self.cb_dedupe,'勾选执行重复检测'),(self.cb_convert,'勾选执行格式转换'),(self.cb_rename,'勾选执行重命名'),
 			(self.sp_workers,'并行线程数'),(self.btn_start,'真实执行'),(self.btn_preview,'仅预览不写入'),(self.btn_cancel,'取消执行'),
@@ -3630,8 +3643,9 @@ class ImageToolApp:
 			# 确保输出目录存在
 			os.makedirs(real_out, exist_ok=True)
 			
-			# 清理输出目录中的文件，但保留缓存目录
-			if os.path.exists(real_out):
+			# 根据用户选择决定是否清理输出目录中的文件
+			if self.clear_output_var.get() and os.path.exists(real_out):
+				self.q.put('INFO 正在清空输出目录...')
 				for item in os.listdir(real_out):
 					item_path = os.path.join(real_out, item)
 					# 跳过缓存目录
@@ -3645,6 +3659,8 @@ class ImageToolApp:
 							os.remove(item_path)
 					except Exception:
 						pass  # 忽略删除错误
+			elif not self.clear_output_var.get():
+				self.q.put('INFO 保留输出目录现有内容...')
 			
 			# 查找最深层的 _final 目录作为源
 			source_dir = self._find_deepest_final_dir()
