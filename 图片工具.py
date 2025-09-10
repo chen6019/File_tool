@@ -407,15 +407,16 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 			- 'fast': 快速压缩
 			
 	Returns:
-		tuple: (是否成功, 结果描述)
-			- (True, 'OK') - 转换成功
-			- (False, 错误信息) - 转换失败，包含详细错误信息
+		tuple: (是否成功, 结果描述, 实际使用的压缩方法)
+			- (True, 'OK', method) - 转换成功
+			- (False, 错误信息, None) - 转换失败，包含详细错误信息
 			
 	Note:
 		支持的动画格式互转：GIF ↔ WebP ↔ APNG
 		动画转换时会尝试保持原始的帧数、持续时间和循环设置
 		针对大文件和高帧数动画进行了优化，包含帧数验证机制
 		当帧数不一致时会自动尝试其他压缩方法
+		返回值增加了实际使用的压缩方法信息，用于日志记录
 	"""
 	import os
 	import psutil
@@ -517,6 +518,8 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 						
 				elif fmt=='webp':
 					# WebP格式：支持动画和多种压缩方法
+					used_method = webp_compression  # 记录实际使用的方法
+					
 					if is_animated:
 						# 定义备用压缩方法顺序（按安全性和效果排序）
 						fallback_methods = ['lossless', 'high_quality', 'standard', 'fast']
@@ -530,8 +533,10 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 						
 						success = False
 						last_error = None
+						tried_methods = []  # 记录尝试过的方法
 						
 						for method in methods_to_try:
+							tried_methods.append(method)
 							try:
 								params = get_webp_params(method, quality, original_frames, file_size, conservative_mode)
 								
@@ -565,15 +570,30 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 											'fast': '快速压缩'
 										}.get(method, method)
 										
+										used_method = method  # 记录成功的方法
 										print(f"WebP转换成功: 使用{method_name}方法，保持{original_frames}帧")
 										success = True
 										break
 									else:
-										print(f"WebP {method}方法帧数不一致: {original_frames} -> {result_frames}，尝试下一种方法")
+										method_name = {
+											'auto': '自动选择',
+											'lossless': '无损压缩', 
+											'high_quality': '高质量',
+											'standard': '标准压缩',
+											'fast': '快速压缩'
+										}.get(method, method)
+										print(f"WebP {method_name}方法帧数不一致: {original_frames} -> {result_frames}，尝试下一种方法")
 										last_error = f"帧数不一致: 原始{original_frames}帧 -> 结果{result_frames}帧"
 										
 							except Exception as e:
-								print(f"WebP {method}方法失败: {e}，尝试下一种方法")
+								method_name = {
+									'auto': '自动选择',
+									'lossless': '无损压缩', 
+									'high_quality': '高质量',
+									'standard': '标准压缩',
+									'fast': '快速压缩'
+								}.get(method, method)
+								print(f"WebP {method_name}方法失败: {e}，尝试下一种方法")
 								last_error = str(e)
 								continue
 						
@@ -616,6 +636,7 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 										result_frames = getattr(result_im, 'n_frames', 1)
 										if result_frames == original_frames:
 											print(f"手动帧处理成功: {original_frames}帧")
+											used_method = 'manual_frame_processing'
 											success = True
 										else:
 											print(f"手动帧处理仍有问题: {original_frames} -> {result_frames}")
@@ -624,8 +645,17 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 								print(f"手动帧处理失败: {manual_error}")
 							
 							if not success:
+								# 记录尝试过的所有方法
+								tried_methods_str = ', '.join([{
+									'auto': '自动选择',
+									'lossless': '无损压缩', 
+									'high_quality': '高质量',
+									'standard': '标准压缩',
+									'fast': '快速压缩'
+								}.get(m, m) for m in tried_methods])
+								
 								# 最终备用方案：提示用户WebP可能不适合此文件
-								return False, f"WebP转换失败(尝试了所有方法): {last_error}。建议改用PNG(APNG)或GIF格式"
+								return False, f"WebP转换失败(已尝试: {tried_methods_str}): {last_error}。建议改用PNG(APNG)或GIF格式", None
 							
 					else:
 						# 静态图片
@@ -646,20 +676,20 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 					result_frames = getattr(result_im, 'n_frames', 1) if getattr(result_im, 'is_animated', False) else 1
 					
 					if result_frames != original_frames:
-						return False, f"帧数不一致: 原始{original_frames}帧 -> 结果{result_frames}帧"
+						return False, f"帧数不一致: 原始{original_frames}帧 -> 结果{result_frames}帧", None
 					elif original_frames > 100:
 						# 对于高帧数动画，返回详细信息
-						return True, f"OK ({original_frames}帧)"
+						return True, f"OK ({original_frames}帧)", getattr(locals(), 'used_method', None)
 			except Exception as e:
 				# 如果验证失败，记录但不影响主流程
 				print(f"帧数验证失败: {e}")
 		
-		return True,'OK'
+		return True, 'OK', getattr(locals(), 'used_method', None)
 		
 	except MemoryError as e:
-		return False, f"内存不足，文件过大: {str(e)}"
+		return False, f"内存不足，文件过大: {str(e)}", None
 	except PermissionError as e:
-		return False, f"权限不足: {str(e)}"
+		return False, f"权限不足: {str(e)}", None
 	except Exception as e:
 		import traceback
 		# 返回详细的错误信息，包含异常类型和堆栈
@@ -669,7 +699,7 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 		if len(tb_lines) > 2:
 			# 取最后的错误行
 			error_detail += f" | {tb_lines[-2].strip()}"
-		return False, error_detail
+		return False, error_detail, None
 
 @dataclass
 class ImgInfo:
@@ -933,9 +963,9 @@ class ImageToolApp:
 		except Exception:
 			pass  # 字体配置失败时使用系统默认
 		
-		# 窗口初始大小 - 设置更宽松的默认尺寸
-		self.root.geometry("1600x880")  # 更宽松的默认尺寸
-		self.root.minsize(1500, 860)  # 提高最小尺寸
+		# 窗口初始化 - 使用自适应大小
+		# 不设置固定geometry，让窗口根据内容自适应
+		self.root.minsize(1600, 900)  # 设置合理的最小尺寸
 
 	def _init_skip_format_vars(self):
 		"""初始化跳过格式相关变量"""
@@ -989,6 +1019,9 @@ class ImageToolApp:
 		
 		# 延迟设置分栏比例为五五分，使用更长的延迟确保窗口完全显示
 		self.root.after(300, self._set_initial_pane_ratio)
+		
+		# 延迟进行窗口居中，确保所有组件都已渲染完成
+		self.root.after(400, self._center_window)
 
 	def _build_config_sections(self):
 		"""
@@ -1102,6 +1135,7 @@ class ImageToolApp:
 		# 事件绑定
 		self.log.bind('<<TreeviewSelect>>', self._on_select_row)
 		self.log.bind('<Motion>', self._on_log_motion)
+		self.log.bind('<Double-1>', self._on_log_double_click)
 
 	def _build_io_section(self):
 		"""构建输入输出区域"""
@@ -1712,6 +1746,41 @@ class ImageToolApp:
 				middle_position = total_width // 2
 				# 使用正确的方法设置sash位置
 				self.main_paned.sashpos(0, middle_position)
+		except Exception:
+			# 静默失败，不影响程序运行
+			pass
+	
+	def _center_window(self):
+		"""
+		将窗口居中显示
+		
+		在UI完全构建完成后调用，让窗口在屏幕中央显示。
+		只设置位置，保持窗口的自适应大小。
+		"""
+		try:
+			self.root.update_idletasks()  # 确保窗口大小计算完成
+			
+			# 获取窗口实际大小
+			width = self.root.winfo_width()
+			height = self.root.winfo_height()
+			
+			# 如果窗口大小还没有正确计算，使用请求的大小
+			if width <= 1 or height <= 1:
+				width = self.root.winfo_reqwidth()
+				height = self.root.winfo_reqheight()
+			
+			# 计算居中位置
+			screen_width = self.root.winfo_screenwidth()
+			screen_height = self.root.winfo_screenheight()
+			x = (screen_width // 2) - (width // 2)
+			y = (screen_height // 2) - (height // 2)
+			
+			# 确保窗口不会超出屏幕边界
+			x = max(0, min(x, screen_width - width))
+			y = max(0, min(y, screen_height - height))
+			
+			# 只设置位置，不设置大小
+			self.root.geometry(f"+{x}+{y}")
 		except Exception:
 			# 静默失败，不影响程序运行
 			pass
@@ -2607,19 +2676,26 @@ class ImageToolApp:
 			if need_convert:
 				if not self.write_to_output:
 					# 实际执行一次到缓存，保证可预览
-					ok_convert,msg_convert=convert_one(src,convert_path,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False, ico_sizes if tgt=='ico' else None, self.ico_square_mode_code() if tgt=='ico' else None, webp_compression if tgt=='webp' else 'auto')
+					ok_convert,msg_convert,used_method=convert_one(src,convert_path,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False, ico_sizes if tgt=='ico' else None, self.ico_square_mode_code() if tgt=='ico' else None, webp_compression if tgt=='webp' else 'auto')
 					if ok_convert:
 						msg_convert = '转换(预览)'
+						if used_method and tgt=='webp' and used_method != webp_compression:
+							msg_convert += f" (方法: {used_method})"
 					else:
 						msg_convert = f'转换失败(预览):{msg_convert}'
 				else:
-					ok_convert,msg_convert=convert_one(src,convert_path,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False, ico_sizes if tgt=='ico' else None, self.ico_square_mode_code() if tgt=='ico' else None, webp_compression if tgt=='webp' else 'auto')
+					ok_convert,msg_convert,used_method=convert_one(src,convert_path,tgt,quality if tgt in ('jpg','png','webp') else None,png3 if tgt=='png' else False, ico_sizes if tgt=='ico' else None, self.ico_square_mode_code() if tgt=='ico' else None, webp_compression if tgt=='webp' else 'auto')
 					if not ok_convert:
 						msg_convert = f'转换失败:{msg_convert}'
 						# 转换失败时：处理失败文件
 						failed_path = self._handle_failed_file(src, msg_convert, True)
 						if failed_path:
 							msg_convert += f" (文件已移至失败文件夹)"
+					elif used_method and tgt=='webp' and used_method != webp_compression:
+						# 记录压缩方法切换到日志
+						webp_method_cn = {v:k for k,v in WEBP_COMPRESSION_MAP.items()}.get(used_method, used_method)
+						original_method_cn = {v:k for k,v in WEBP_COMPRESSION_MAP.items()}.get(webp_compression, webp_compression)
+						self.q.put(f'LOG\tCONVERT\t{src}\t{convert_path}\t压缩方法切换: {original_method_cn} → {webp_method_cn}')
 				# 预览模式时不执行删源操作
 			else:
 				# 纯重命名/复制路径
@@ -3098,10 +3174,16 @@ class ImageToolApp:
 			try: os.makedirs(dest_dir, exist_ok=True)
 			except Exception: pass
 			dest=os.path.join(dest_dir,out_name)
-			ok,msg=convert_one(f,dest,tgt_fmt,quality if tgt_fmt in ('jpg','png','webp') else None,png3 if tgt_fmt=='png' else False,ico_sizes if tgt_fmt=='ico' else None,self.ico_square_mode_code() if tgt_fmt=='ico' else None, webp_compression if tgt_fmt=='webp' else 'auto')
+			ok,msg,used_method=convert_one(f,dest,tgt_fmt,quality if tgt_fmt in ('jpg','png','webp') else None,png3 if tgt_fmt=='png' else False,ico_sizes if tgt_fmt=='ico' else None,self.ico_square_mode_code() if tgt_fmt=='ico' else None, webp_compression if tgt_fmt=='webp' else 'auto')
 			with lock:
 				if ok:
-					self.q.put(f'LOG\tCONVERT\t{f}\t{dest}\t转换')
+					log_msg = '转换'
+					if used_method and tgt_fmt=='webp' and used_method != webp_compression:
+						# 记录压缩方法切换到日志
+						webp_method_cn = {v:k for k,v in WEBP_COMPRESSION_MAP.items()}.get(used_method, used_method)
+						original_method_cn = {v:k for k,v in WEBP_COMPRESSION_MAP.items()}.get(webp_compression, webp_compression)
+						log_msg += f" (方法切换: {original_method_cn} → {webp_method_cn})"
+					self.q.put(f'LOG\tCONVERT\t{f}\t{dest}\t{log_msg}')
 				else:
 					self.q.put(f'LOG\tCONVERT\t{f}\t{dest}\t转换失败:{msg}')
 				results[i]= dest if ok else f  # 失败的文件传递原路径到下一阶段
@@ -3837,6 +3919,32 @@ class ImageToolApp:
 		if not tags: return
 		full=tags[0]
 		self._tooltip_after=self.root.after(500, lambda p=full,x=self.root.winfo_pointerx(),y=self.root.winfo_pointery(): self._show_tooltip(p,x,y))
+	
+	def _on_log_double_click(self, event):
+		"""双击日志记录时，自动将源文件名填入日志搜索框"""
+		iid = self.log.identify_row(event.y)
+		if not iid:
+			return
+		
+		# 获取行数据
+		values = self.log.item(iid, 'values')
+		if not values or len(values) < 2:
+			return
+		
+		# 获取源文件名（第二列）
+		src_basename = values[1]  # 源文件列
+		if not src_basename:
+			return
+		
+		# 提取文件名（去除路径）
+		filename = os.path.basename(src_basename)
+		
+		# 填入搜索框
+		self.log_filter_kw.set(filename)
+		
+		# 触发过滤更新（这会自动调用_on_change_log_filter）
+		# 由于trace已经绑定，设置值会自动触发过滤
+		
 	def _on_out_dir_change(self, *args):
 		# 输出目录改变时清除缓存
 		self._clear_cache()
