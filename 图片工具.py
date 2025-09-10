@@ -324,9 +324,30 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 	Note:
 		支持的动画格式互转：GIF ↔ WebP ↔ APNG
 		动画转换时会尝试保持原始的帧数、持续时间和循环设置
+		针对大文件和高帧数动画进行了优化，包含帧数验证机制
 	"""
+	import os
+	import psutil
+	
 	try:
+		# 检查文件大小
+		file_size = os.path.getsize(src)
+		
+		# 检查可用内存
+		available_memory = psutil.virtual_memory().available
+		
+		# 对于大文件（>50MB）或内存不足的情况，启用保守模式
+		conservative_mode = file_size > 50 * 1024 * 1024 or available_memory < 500 * 1024 * 1024
+		
 		with Image.open(src) as im:  # type: ignore
+			# 检测动画信息
+			is_animated = hasattr(im, 'is_animated') and im.is_animated
+			original_frames = getattr(im, 'n_frames', 1) if is_animated else 1
+			
+			# 对于高帧数动画，记录详细信息用于验证
+			if is_animated and original_frames > 100:
+				print(f"处理高帧数动画: {original_frames}帧, 文件大小: {file_size/1024/1024:.1f}MB")
+			
 			if fmt=='ico':
 				w,h=im.size
 				if w!=h and square_mode and square_mode!='keep':
@@ -341,13 +362,14 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 						x=(side-w)//2; y=(side-h)//2
 						canvas.paste(im,(x,y))
 						im=canvas
-			# 检测是否为动画图片
-			is_animated = hasattr(im, 'is_animated') and im.is_animated
 			
 			if fmt=='gif':
 				# GIF格式：保持动画和循环信息
-				save_params = {'save_all': True} if is_animated else {}
+				save_params = {}
 				if is_animated:
+					save_params['save_all'] = True
+					save_params['optimize'] = False  # 对于大文件禁用优化以确保帧完整性
+					
 					# 保留原始动画的持续时间和循环信息
 					try:
 						if hasattr(im, 'info'):
@@ -357,9 +379,17 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 								save_params['loop'] = im.info['loop']
 					except Exception:
 						pass
+						
+					# 对于高帧数动画，使用更保守的参数
+					if original_frames > 200 or conservative_mode:
+						save_params['optimize'] = False
+						save_params['disposal'] = 2  # 恢复到背景颜色
+				
 				im.save(dst, **save_params)
+				
 			elif fmt=='ico':
 				im.save(dst, sizes=[(s,s) for s in (ico_sizes or [256])])
+				
 			else:
 				params={}
 				if fmt=='jpg':
@@ -370,10 +400,13 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 						im=bg
 					else:
 						im=im.convert('RGB')
+						
 				elif fmt=='png':
 					# PNG格式：支持APNG（动画PNG）
 					if is_animated:
 						params['save_all'] = True
+						params['optimize'] = False  # 保证帧完整性
+						
 						# 保留动画信息
 						try:
 							if hasattr(im, 'info'):
@@ -383,13 +416,23 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 									params['loop'] = im.info['loop']
 						except Exception:
 							pass
+							
+						# 对于高帧数APNG，使用特殊设置
+						if original_frames > 100 or conservative_mode:
+							params['compress_level'] = 1  # 低压缩级别，保证速度和稳定性
+							
 					elif png3:
 						im=im.convert('P',palette=Image.ADAPTIVE,colors=256)
+						
 				elif fmt=='webp':
 					params['quality']=quality or 80
+					params['method'] = 4  # 使用中等压缩方法，平衡质量和速度
+					
 					# WebP格式：支持动画
 					if is_animated:
 						params['save_all'] = True
+						params['minimize_size'] = False  # 不优化文件大小，确保帧完整性
+						
 						# 保留动画的时间间隔和循环信息
 						try:
 							if hasattr(im, 'info'):
@@ -399,12 +442,37 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 									params['loop'] = im.info['loop']
 						except Exception:
 							pass
+							
+						# 对于高帧数WebP，使用更保守的设置
+						if original_frames > 150 or conservative_mode:
+							params['method'] = 0  # 最快的压缩方法
+							params['quality'] = min(params['quality'], 90)  # 限制质量以节省内存
+				
 				# 修复Pillow格式名称映射
 				pillow_fmt = fmt.upper()
 				if pillow_fmt == 'JPG':
 					pillow_fmt = 'JPEG'
 				im.save(dst, pillow_fmt, **params)
+		
+		# 验证转换结果的帧数（仅对动画）
+		if is_animated and original_frames > 1:
+			try:
+				with Image.open(dst) as result_im:
+					result_frames = getattr(result_im, 'n_frames', 1) if getattr(result_im, 'is_animated', False) else 1
+					
+					if result_frames != original_frames:
+						return False, f"帧数不一致: 原始{original_frames}帧 -> 结果{result_frames}帧"
+					elif original_frames > 100:
+						# 对于高帧数动画，返回详细信息
+						return True, f"OK ({original_frames}帧)"
+			except Exception as e:
+				# 如果验证失败，记录但不影响主流程
+				print(f"帧数验证失败: {e}")
+		
 		return True,'OK'
+		
+	except MemoryError as e:
+		return False, f"内存不足，文件过大: {str(e)}"
 	except PermissionError as e:
 		return False, f"权限不足: {str(e)}"
 	except Exception as e:
