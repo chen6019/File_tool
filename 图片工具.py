@@ -913,6 +913,28 @@ class ImageToolApp:
 		self.single_file_mode = False
 		self._ratio_map = {}  # 路径 -> 比例标签
 		
+		# 统计信息追踪器
+		self.stats = {
+			'start_time': None,
+			'end_time': None,
+			'total_files': 0,
+			'input_files': 0,
+			'output_files': 0,
+			'skipped_files': 0,
+			'error_files': 0,
+			'converted_files': 0,
+			'renamed_files': 0,
+			'dedupe_removed': 0,
+			'dedupe_kept': 0,
+			'classified_files': 0,
+			'warnings_count': 0,
+			'errors_count': 0,
+			'file_formats': {},  # 格式分布统计
+			'operations': [],  # 执行的操作列表
+			'total_size_before': 0,
+			'total_size_after': 0,
+		}
+		
 		# 缓存和输出相关
 		self.last_out_dir = None
 		self.cache_dir = None  # 预览缓存文件夹
@@ -943,6 +965,9 @@ class ImageToolApp:
 	def _setup_warning_handler(self):
 		"""设置警告处理器，将PIL等库的警告记录到日志文件"""
 		def warning_handler(message, category, filename, lineno, file=None, line=None):
+			# 更新警告统计
+			self.stats['warnings_count'] += 1
+			
 			# 格式化警告信息
 			warning_msg = f"{category.__name__}: {message}"
 			if filename:
@@ -957,6 +982,186 @@ class ImageToolApp:
 		
 		# 设置自定义警告处理器
 		warnings.showwarning = warning_handler
+
+	def _reset_stats(self):
+		"""重置统计信息"""
+		self.stats = {
+			'start_time': None,
+			'end_time': None,
+			'total_files': 0,
+			'input_files': 0,
+			'output_files': 0,
+			'skipped_files': 0,
+			'error_files': 0,
+			'converted_files': 0,
+			'renamed_files': 0,
+			'dedupe_removed': 0,
+			'dedupe_kept': 0,
+			'classified_files': 0,
+			'warnings_count': 0,
+			'errors_count': 0,
+			'file_formats': {},  # 格式分布统计
+			'operations': [],  # 执行的操作列表
+			'total_size_before': 0,
+			'total_size_after': 0,
+		}
+
+	def _generate_stats_report(self):
+		"""生成并记录详细的统计报告"""
+		if not self.stats['start_time'] or not self.stats['end_time']:
+			return
+		
+		duration = self.stats['end_time'] - self.stats['start_time']
+		
+		# 计算文件大小变化
+		size_change = self.stats['total_size_after'] - self.stats['total_size_before']
+		size_change_mb = size_change / (1024 * 1024)
+		
+		# 构建统计报告
+		report_lines = [
+			"",
+			"=" * 60,
+			"处理统计报告",
+			"=" * 60,
+			f"执行时间: {duration:.2f} 秒",
+			f"执行模式: {'正式处理' if self.write_to_output else '预览模式'}",
+			"",
+			"文件统计:",
+			f"  输入文件总数: {self.stats['input_files']}",
+			f"  输出文件总数: {self.stats['output_files']}",
+			f"  跳过文件数: {self.stats['skipped_files']}",
+			f"  错误文件数: {self.stats['error_files']}",
+			"",
+			"操作统计:",
+		]
+		
+		# 添加操作统计
+		if self.stats['converted_files'] > 0:
+			report_lines.append(f"  格式转换: {self.stats['converted_files']} 个文件")
+		if self.stats['renamed_files'] > 0:
+			report_lines.append(f"  文件重命名: {self.stats['renamed_files']} 个文件")
+		if self.stats['classified_files'] > 0:
+			report_lines.append(f"  文件分类: {self.stats['classified_files']} 个文件")
+		if self.stats['dedupe_removed'] > 0 or self.stats['dedupe_kept'] > 0:
+			report_lines.extend([
+				f"  去重处理:",
+				f"    保留文件: {self.stats['dedupe_kept']} 个",
+				f"    删除重复: {self.stats['dedupe_removed']} 个",
+			])
+		
+		if not any(self.stats[key] > 0 for key in ['converted_files', 'renamed_files', 'classified_files', 'dedupe_removed']):
+			report_lines.append("  无特殊操作")
+		
+		# 文件格式分布
+		if self.stats['file_formats']:
+			report_lines.extend([
+				"",
+				"文件格式分布:",
+			])
+			for fmt, count in sorted(self.stats['file_formats'].items()):
+				report_lines.append(f"  {fmt.upper()}: {count} 个文件")
+		
+		# 大小统计
+		if self.stats['total_size_before'] > 0:
+			report_lines.extend([
+				"",
+				"文件大小统计:",
+				f"  处理前总大小: {self.stats['total_size_before'] / (1024*1024):.2f} MB",
+				f"  处理后总大小: {self.stats['total_size_after'] / (1024*1024):.2f} MB",
+				f"  大小变化: {size_change_mb:+.2f} MB ({size_change_mb/max(self.stats['total_size_before']/(1024*1024), 0.01)*100:+.1f}%)",
+			])
+		
+		# 错误和警告统计
+		if self.stats['warnings_count'] > 0 or self.stats['errors_count'] > 0:
+			report_lines.extend([
+				"",
+				"问题统计:",
+				f"  警告数量: {self.stats['warnings_count']}",
+				f"  错误数量: {self.stats['errors_count']}",
+			])
+		
+		# 执行的操作列表
+		if self.stats['operations']:
+			report_lines.extend([
+				"",
+				"执行的操作:",
+			])
+			for op in self.stats['operations']:
+				report_lines.append(f"  ✓ {op}")
+		
+		report_lines.extend([
+			"",
+			"=" * 60,
+			""
+		])
+		
+		# 记录到日志
+		for line in report_lines:
+			self.q.put(f'STATS {line}')
+		
+		# 同时打印到控制台
+		print("\n".join(report_lines))
+
+	def _collect_output_stats(self, output_dir):
+		"""收集输出目录的统计信息"""
+		try:
+			if not os.path.exists(output_dir):
+				return
+			
+			output_count = 0
+			total_size = 0
+			
+			for root, dirs, files in os.walk(output_dir):
+				# 跳过缓存目录
+				if '.preview_cache' in root:
+					continue
+				
+				for file in files:
+					file_path = os.path.join(root, file)
+					try:
+						if os.path.exists(file_path):
+							output_count += 1
+							total_size += os.path.getsize(file_path)
+					except Exception:
+						pass
+			
+			self.stats['output_files'] = output_count
+			self.stats['total_size_after'] = total_size
+			
+		except Exception:
+			pass
+
+	def _update_stats_from_log(self, stage, src, dst, info):
+		"""从日志消息中更新统计信息"""
+		try:
+			# 统计各种操作
+			if stage == 'CONVERT':
+				if '成功' in info or ('转换' in info and '失败' not in info):
+					self.stats['converted_files'] += 1
+				elif '失败' in info:
+					self.stats['error_files'] += 1
+			elif stage == 'RENAME':
+				if '成功' in info or ('重命名' in info and '失败' not in info):
+					self.stats['renamed_files'] += 1
+				elif '失败' in info:
+					self.stats['error_files'] += 1
+			elif stage == 'CLASSIFY':
+				if '成功' in info or ('分类' in info and '失败' not in info):
+					self.stats['classified_files'] += 1
+				elif '失败' in info:
+					self.stats['error_files'] += 1
+			elif stage == 'DEDUP':
+				if '删除' in info or '移动' in info:
+					self.stats['dedupe_removed'] += 1
+				elif '保留' in info:
+					self.stats['dedupe_kept'] += 1
+			
+			# 统计跳过的文件
+			if '跳过' in info:
+				self.stats['skipped_files'] += 1
+			
+		except Exception:
+			pass
 
 	def _setup_ui_config(self):
 		"""
@@ -2308,6 +2513,10 @@ class ImageToolApp:
 		4. 执行实际的处理流程
 		"""
 		try:
+			# 重置统计信息
+			self._reset_stats()
+			self.stats['start_time'] = time.time()
+			
 			# 通过队列更新状态
 			self.q.put('STATUS 正在初始化...')
 			
@@ -2344,6 +2553,23 @@ class ImageToolApp:
 				try:
 					all_files, non_image_files = self._scan_directory_files(root_dir, self.recursive_var.get())
 					self._all_files = all_files
+					
+					# 收集输入文件统计
+					self.stats['input_files'] = len(all_files)
+					self.stats['total_files'] = len(all_files)
+					
+					# 收集文件格式统计和大小统计
+					for file_path in all_files:
+						try:
+							ext = os.path.splitext(file_path)[1].lower()
+							self.stats['file_formats'][ext] = self.stats['file_formats'].get(ext, 0) + 1
+							
+							# 累计文件大小
+							if os.path.exists(file_path):
+								self.stats['total_size_before'] += os.path.getsize(file_path)
+						except Exception:
+							pass
+					
 				except PermissionError:
 					self.q.put('ERROR 输入文件夹无读取权限')
 					return
@@ -2431,6 +2657,19 @@ class ImageToolApp:
 		"""执行顺序: 0复制输入到缓存 -> 1分类(多文件且启用) -> 2转换 -> 3去重(多文件且启用) -> 4重命名 -> 5复制到最终输出(仅正常模式)"""
 		try:
 			files=self._all_files
+			
+			# 记录启用的操作
+			if not self.single_file_mode and self.classify_ratio_var.get():
+				self.stats['operations'].append('图片比例分类')
+			if not self.single_file_mode and self.classify_shape_var.get():
+				self.stats['operations'].append('图片形状分类')
+			if self.enable_convert.get():
+				self.stats['operations'].append('格式转换')
+			if not self.single_file_mode and self.enable_dedupe.get():
+				self.stats['operations'].append('重复图片检测')
+			if self.enable_rename.get():
+				self.stats['operations'].append('文件重命名')
+			
 			# 确保缓存目录已初始化
 			self._ensure_cache_dir()
 			# 0 复制输入文件到缓存 (新增步骤)
@@ -2471,6 +2710,10 @@ class ImageToolApp:
 			remove_info = ""
 			if self.write_to_output:
 				remove_info = self._finalize_to_output()
+			
+			# 设置结束时间并生成统计报告
+			self.stats['end_time'] = time.time()
+			self._generate_stats_report()
 			
 			# 合并完成状态信息
 			if not self.write_to_output:
@@ -3442,6 +3685,9 @@ class ImageToolApp:
 			
 			# 内部状态信息，不显示在日志框中
 			
+			# 统计输出文件数量和大小
+			self._collect_output_stats(real_out)
+			
 			# 最后一步：如果启用删源功能，删除输入文件夹中的原始文件
 			remove_info = ""
 			if self.global_remove_src.get():
@@ -3540,10 +3786,16 @@ class ImageToolApp:
 					# 处理警告消息，记录到日志但不显示在状态栏
 					warning_msg = m[8:]
 					print(f"[WARNING] {warning_msg}")  # 确保控制台也有记录
+				elif m.startswith('STATS '):
+					# 处理统计报告消息，记录到日志但不显示在状态栏
+					stats_msg = m[6:]
+					# 统计报告不需要额外的控制台输出，因为_generate_stats_report已经处理了
 				elif m.startswith('ERROR '):
 					# 处理错误消息
 					error_msg = m[6:]
 					self.status_var.set(error_msg)
+					# 更新错误统计
+					self.stats['errors_count'] += 1
 					# 如果是权限错误，显示详细对话框
 					if '权限' in error_msg:
 						messagebox.showerror('权限错误', error_msg)
@@ -3565,6 +3817,10 @@ class ImageToolApp:
 					try:
 						_tag,stage,src,dst,info=m.split('\t',4)
 						stage_disp=STAGE_MAP_DISPLAY.get(stage,stage)
+						
+						# 更新统计信息
+						self._update_stats_from_log(stage, src, dst, info)
+						
 						# 根据 stage 推断 tag
 						stag='STAGE_INFO'
 						if stage=='DEDUP': stag='STAGE_DEDUPE'
