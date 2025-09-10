@@ -1793,10 +1793,10 @@ class ImageToolApp:
 		
 		这是所有处理功能的统一入口点，负责：
 		1. 检查任务状态，防止重复运行
-		2. 清理缓存和重置状态
-		3. 验证输入输出路径
-		4. 启动后台工作线程
-		5. 根据选择的功能执行相应处理
+		2. 基本输入验证
+		3. 启动后台工作线程
+		
+		耗时操作已移至后台线程中执行，避免UI阻塞。
 		
 		Args:
 			write_to_output (bool): 是否写入最终输出目录
@@ -1805,13 +1805,8 @@ class ImageToolApp:
 		"""
 		if self.worker and self.worker.is_alive():
 			messagebox.showinfo('提示','任务运行中'); return
-		self.write_to_output=write_to_output
-		# 清空已处理文件记录
-		self.processed_source_files.clear()
-		self.cache_to_original_map.clear()
-		# 统一清除缓存并初始化缓存目录
-		self._clear_cache()
-		self._ensure_cache_dir()
+		
+		# 基本输入验证
 		inp=self.in_var.get().strip()
 		if not inp: 
 			self.status_var.set('未选择输入'); return
@@ -1820,80 +1815,17 @@ class ImageToolApp:
 		if not os.path.exists(inp):
 			self.status_var.set('输入路径不存在'); return
 		
-		self.single_file_mode=False
-		if os.path.isdir(inp):
-			root_dir=inp
-			out_dir=self.out_var.get().strip() or root_dir
-			
-			# 尝试创建输出文件夹
-			try:
-				os.makedirs(out_dir,exist_ok=True)
-			except PermissionError:
-				messagebox.showerror('权限错误', '输出文件夹创建失败：权限不足')
-				self.status_var.set('权限错误'); return
-			except Exception as e:
-				self.status_var.set(f'输出文件夹创建失败：{e}'); return
-			
-			# 统计文件信息
-			try:
-				all_files, non_image_files = self._scan_directory_files(root_dir, self.recursive_var.get())
-				self._all_files = all_files
-			except PermissionError:
-				messagebox.showerror('权限错误', '输入文件夹无读取权限')
-				self.status_var.set('权限错误'); return
-			except Exception as e:
-				self.status_var.set(f'读取输入文件夹失败：{e}'); return
-			
-			# 提供文件统计信息
-			if non_image_files:
-				non_image_count = len(non_image_files)
-				image_count = len(all_files)
-				if image_count == 0:
-					# 只有非图片文件
-					sample_files = ', '.join(non_image_files[:3])
-					if non_image_count > 3:
-						sample_files += f' 等{non_image_count}个文件'
-					self.status_var.set(f'文件夹中无图片文件，只有非图片文件：{sample_files}'); return
-				else:
-					# 有图片也有非图片文件
-					sample_files = ', '.join(non_image_files[:2])
-					if non_image_count > 2:
-						sample_files += f' 等{non_image_count}个'
-					print(f"发现 {image_count} 个图片文件，{non_image_count} 个非图片文件({sample_files})将被忽略")
-			elif len(all_files) == 0:
-				self.status_var.set('文件夹为空或无图片文件'); return
-		elif os.path.isfile(inp):
-			# 单文件模式
-			# 检查是否为支持的图片格式
-			if os.path.splitext(inp)[1].lower() not in SUPPORTED_EXT:
-				self.status_var.set('不支持的文件格式'); return
-			
-			root_dir=os.path.dirname(inp) or os.getcwd()
-			out_dir=self.out_var.get().strip() or root_dir
-			
-			# 尝试创建输出文件夹
-			try:
-				os.makedirs(out_dir,exist_ok=True)
-			except PermissionError:
-				messagebox.showerror('权限错误', '输出文件夹创建失败：权限不足')
-				self.status_var.set('权限错误'); return
-			except Exception as e:
-				self.status_var.set(f'输出文件夹创建失败：{e}'); return
-			
-			self._all_files=[inp]
-			self.single_file_mode=True
-		else:
-			self.status_var.set('输入路径类型不支持'); return
+		# 设置任务参数
+		self.write_to_output=write_to_output
 		
-		# 最终检查
-		if not self._all_files: 
-			self.status_var.set('无有效图片文件'); return
-		
+		# 清空UI状态
 		for i in self.log.get_children(): self.log.delete(i)
-		self.progress['value']=0; self.progress['maximum']=len(self._all_files)
-		self.status_var.set('开始...' if write_to_output else '预览模式 (不修改文件)')
-		self.stop_flag.clear(); self.last_out_dir=out_dir
-		self.worker=threading.Thread(target=self._pipeline,daemon=True); self.worker.start()
+		self.progress['value']=0
+		self.status_var.set('初始化中...' if write_to_output else '初始化预览模式...')
+		self.stop_flag.clear()
+		
+		# 启动后台线程，所有耗时操作都在线程中进行
+		self.worker=threading.Thread(target=self._pipeline_with_init,daemon=True); self.worker.start()
 
 	def _cancel(self):
 		self.stop_flag.set(); self.status_var.set('请求取消...')
@@ -2342,6 +2274,133 @@ class ImageToolApp:
 			error_detail = f"{str(e)} | Traceback: {traceback.format_exc().replace(chr(10), ' | ')}"
 			self.q.put(f'LOG\tCOPY_INPUT\t\t\t失败: {error_detail}')
 			return files  # 返回原始文件列表作为备用
+
+	def _pipeline_with_init(self):
+		"""
+		后台线程入口点，包含初始化和实际处理流程
+		
+		在后台线程中执行所有耗时操作，包括：
+		1. 清理缓存和重置状态
+		2. 验证和创建输出路径
+		3. 扫描目录文件
+		4. 执行实际的处理流程
+		"""
+		try:
+			# 通过队列更新状态
+			self.q.put('STATUS 正在初始化...')
+			
+			# 清空已处理文件记录
+			self.processed_source_files.clear()
+			self.cache_to_original_map.clear()
+			
+			# 统一清除缓存并初始化缓存目录
+			self.q.put('STATUS 正在清理缓存...')
+			self._clear_cache()
+			self._ensure_cache_dir()
+			
+			if self.stop_flag.is_set(): return
+			
+			inp=self.in_var.get().strip()
+			self.single_file_mode=False
+			
+			if os.path.isdir(inp):
+				root_dir=inp
+				out_dir=self.out_var.get().strip() or root_dir
+				
+				# 尝试创建输出文件夹
+				try:
+					os.makedirs(out_dir,exist_ok=True)
+				except PermissionError:
+					self.q.put('ERROR 输出文件夹创建失败：权限不足')
+					return
+				except Exception as e:
+					self.q.put(f'ERROR 输出文件夹创建失败：{e}')
+					return
+				
+				# 统计文件信息
+				self.q.put('STATUS 正在扫描文件...')
+				try:
+					all_files, non_image_files = self._scan_directory_files(root_dir, self.recursive_var.get())
+					self._all_files = all_files
+				except PermissionError:
+					self.q.put('ERROR 输入文件夹无读取权限')
+					return
+				except Exception as e:
+					self.q.put(f'ERROR 读取输入文件夹失败：{e}')
+					return
+				
+				if self.stop_flag.is_set(): return
+				
+				# 提供文件统计信息
+				if non_image_files:
+					non_image_count = len(non_image_files)
+					image_count = len(all_files)
+					if image_count == 0:
+						# 只有非图片文件
+						sample_files = ', '.join(non_image_files[:3])
+						if non_image_count > 3:
+							sample_files += f' 等{non_image_count}个文件'
+						self.q.put(f'ERROR 文件夹中无图片文件，只有非图片文件：{sample_files}')
+						return
+					else:
+						# 有图片也有非图片文件
+						sample_files = ', '.join(non_image_files[:2])
+						if non_image_count > 2:
+							sample_files += f' 等{non_image_count}个'
+						print(f"发现 {image_count} 个图片文件，{non_image_count} 个非图片文件({sample_files})将被忽略")
+				elif len(all_files) == 0:
+					self.q.put('ERROR 文件夹为空或无图片文件')
+					return
+					
+			elif os.path.isfile(inp):
+				# 单文件模式
+				# 检查是否为支持的图片格式
+				if os.path.splitext(inp)[1].lower() not in SUPPORTED_EXT:
+					self.q.put('ERROR 不支持的文件格式')
+					return
+				
+				root_dir=os.path.dirname(inp) or os.getcwd()
+				out_dir=self.out_var.get().strip() or root_dir
+				
+				# 尝试创建输出文件夹
+				try:
+					os.makedirs(out_dir,exist_ok=True)
+				except PermissionError:
+					self.q.put('ERROR 输出文件夹创建失败：权限不足')
+					return
+				except Exception as e:
+					self.q.put(f'ERROR 输出文件夹创建失败：{e}')
+					return
+				
+				self._all_files=[inp]
+				self.single_file_mode=True
+			else:
+				self.q.put('ERROR 输入路径类型不支持')
+				return
+			
+			# 最终检查
+			if not self._all_files: 
+				self.q.put('ERROR 无有效图片文件')
+				return
+			
+			if self.stop_flag.is_set(): return
+			
+			# 设置进度条最大值
+			self.q.put(f'PROGRESS_MAX {len(self._all_files)}')
+			self.last_out_dir=out_dir
+			
+			# 更新状态并开始实际处理
+			status_msg = '开始处理...' if self.write_to_output else '预览模式 (不修改文件)'
+			self.q.put(f'STATUS {status_msg}')
+			
+			# 调用实际的处理流程
+			self._pipeline()
+			
+		except Exception as e:
+			import traceback
+			error_msg = f'初始化失败：{str(e)}'
+			print(f"Pipeline init error: {traceback.format_exc()}")
+			self.q.put(f'ERROR {error_msg}')
 
 	def _pipeline(self):
 		"""执行顺序: 0复制输入到缓存 -> 1分类(多文件且启用) -> 2转换 -> 3去重(多文件且启用) -> 4重命名 -> 5复制到最终输出(仅正常模式)"""
@@ -3445,6 +3504,20 @@ class ImageToolApp:
 					self.status_var.set(f'处理 {pct}% ({d}/{total})')
 				elif m.startswith('STATUS '):
 					self.status_var.set(m[7:])
+				elif m.startswith('ERROR '):
+					# 处理错误消息
+					error_msg = m[6:]
+					self.status_var.set(error_msg)
+					# 如果是权限错误，显示详细对话框
+					if '权限' in error_msg:
+						messagebox.showerror('权限错误', error_msg)
+					else:
+						messagebox.showerror('错误', error_msg)
+				elif m.startswith('PROGRESS_MAX '):
+					# 设置进度条最大值
+					max_val = int(m[13:])
+					self.progress['maximum'] = max_val
+					self.progress['value'] = 0
 				elif m.startswith('PERMISSION_ERROR\t'):
 					# 处理权限错误
 					try:
