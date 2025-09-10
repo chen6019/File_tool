@@ -19,6 +19,7 @@ import subprocess
 import re
 import hashlib
 import time
+import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import List, Iterable
@@ -929,12 +930,33 @@ class ImageToolApp:
 		self.preview_thread = PreviewThread(self)
 		self.preview_thread.start()
 		
+		# 设置警告处理
+		self._setup_warning_handler()
+		
 		# 构建UI
 		self._build()
 		self.root.after(200, self._drain)
 		
 		# 退出时清理缓存
 		self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+	def _setup_warning_handler(self):
+		"""设置警告处理器，将PIL等库的警告记录到日志文件"""
+		def warning_handler(message, category, filename, lineno, file=None, line=None):
+			# 格式化警告信息
+			warning_msg = f"{category.__name__}: {message}"
+			if filename:
+				warning_msg += f" ({os.path.basename(filename)}:{lineno})"
+			
+			# 通过队列记录到日志文件
+			if hasattr(self, 'q'):
+				self.q.put(f'WARNING {warning_msg}')
+			
+			# 同时打印到控制台
+			print(f"[WARNING] {warning_msg}")
+		
+		# 设置自定义警告处理器
+		warnings.showwarning = warning_handler
 
 	def _setup_ui_config(self):
 		"""
@@ -2347,7 +2369,10 @@ class ImageToolApp:
 						sample_files = ', '.join(non_image_files[:2])
 						if non_image_count > 2:
 							sample_files += f' 等{non_image_count}个'
-						print(f"发现 {image_count} 个图片文件，{non_image_count} 个非图片文件({sample_files})将被忽略")
+						info_msg = f"发现 {image_count} 个图片文件，{non_image_count} 个非图片文件({sample_files})将被忽略"
+						print(info_msg)
+						# 记录到日志文件
+						self.q.put(f'INFO {info_msg}')
 				elif len(all_files) == 0:
 					self.q.put('ERROR 文件夹为空或无图片文件')
 					return
@@ -3177,7 +3202,10 @@ class ImageToolApp:
 				filtered_files.append(f)
 			
 			if skipped_count > 0:
-				print(f"格式转换阶段跳过了 {skipped_count} 个文件")
+				skip_msg = f"格式转换阶段跳过了 {skipped_count} 个文件"
+				print(skip_msg)
+				# 记录到日志文件
+				self.q.put(f'INFO {skip_msg}')
 			files = filtered_files
 		
 		# 确保缓存目录已初始化，统一使用缓存目录进行中间处理
@@ -3504,6 +3532,14 @@ class ImageToolApp:
 					self.status_var.set(f'处理 {pct}% ({d}/{total})')
 				elif m.startswith('STATUS '):
 					self.status_var.set(m[7:])
+				elif m.startswith('INFO '):
+					# 处理信息消息，记录到日志但不显示在状态栏
+					info_msg = m[5:]
+					print(f"[INFO] {info_msg}")  # 确保控制台也有记录
+				elif m.startswith('WARNING '):
+					# 处理警告消息，记录到日志但不显示在状态栏
+					warning_msg = m[8:]
+					print(f"[WARNING] {warning_msg}")  # 确保控制台也有记录
 				elif m.startswith('ERROR '):
 					# 处理错误消息
 					error_msg = m[6:]
