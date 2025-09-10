@@ -779,14 +779,18 @@ class ImageToolApp:
 		before_frame.columnconfigure(0,weight=1)
 		before_frame.rowconfigure(0,weight=1)
 		self.preview_before_label=ttk.Label(before_frame,text='(源)'); self.preview_before_label.grid(row=0,column=0,sticky='n')
-		self.preview_before_info=tk.StringVar(value=''); ttk.Label(before_frame,textvariable=self.preview_before_info,foreground='gray').grid(row=1,column=0,sticky='we')
+		self.preview_before_info=tk.StringVar(value='')
+		self.preview_before_info_label=ttk.Label(before_frame,textvariable=self.preview_before_info,foreground='gray',wraplength=400,justify='left')
+		self.preview_before_info_label.grid(row=1,column=0,sticky='we',padx=2)
 		
 		# AFTER
 		after_frame=ttk.Frame(prev,padding=2); after_frame.grid(row=0,column=1,sticky='nsew')
 		after_frame.columnconfigure(0,weight=1)
 		after_frame.rowconfigure(0,weight=1)
 		self.preview_after_label=ttk.Label(after_frame,text='(结果)'); self.preview_after_label.grid(row=0,column=0,sticky='n')
-		self.preview_after_info=tk.StringVar(value=''); ttk.Label(after_frame,textvariable=self.preview_after_info,foreground='gray').grid(row=1,column=0,sticky='we')
+		self.preview_after_info=tk.StringVar(value='')
+		self.preview_after_info_label=ttk.Label(after_frame,textvariable=self.preview_after_info,foreground='gray',wraplength=400,justify='left')
+		self.preview_after_info_label.grid(row=1,column=0,sticky='we',padx=2)
 		
 		# 兼容旧属性引用
 		self.preview_label=self.preview_after_label
@@ -1703,7 +1707,8 @@ class ImageToolApp:
 					rel = os.path.basename(image_data['path'])
 				
 				size_txt = self._format_size(image_data['size'])
-				info_var.set(f'{w}x{h} {size_txt} {rel}')
+				# 使用换行符分隔不同信息，提高可读性
+				info_var.set(f'{w}x{h} {size_txt}\n{rel}')
 				
 			elif image_data['type'] == 'animated':
 				# 动态图片
@@ -1740,7 +1745,8 @@ class ImageToolApp:
 					rel = os.path.basename(image_data['path'])
 				
 				size_txt = self._format_size(image_data['size'])
-				info_var.set(f'{w}x{h} {size_txt} {rel} (动图 {len(frames)} 帧)')
+				# 使用换行符分隔不同信息，提高可读性
+				info_var.set(f'{w}x{h} {size_txt} (动图 {len(frames)} 帧)\n{rel}')
 				
 			elif image_data['type'] == 'error':
 				# 错误情况
@@ -3171,7 +3177,7 @@ class ImageToolApp:
 		# 只调整高度: 计算需要的总高度
 		root_y0=self.root.winfo_rooty()
 		preview_top = self.preview_before_label.winfo_rooty()-root_y0
-		extra_h=110  # info 行 + 边距
+		extra_h=130  # info 行 + 边距，增加高度以适应多行文件路径显示
 		desired_h=preview_top+img_h+extra_h
 		sh=self.root.winfo_screenheight(); margin=50
 		desired_h=min(desired_h, sh-margin)
@@ -3206,7 +3212,7 @@ class ImageToolApp:
 		self.preview_before_label.configure(
 			text=f"源文件: {src_basename}",
 			image='',
-			wraplength=380,  # 设置文本换行宽度
+			wraplength=400,  # 设置文本换行宽度，匹配新的窗口大小
 			justify='left'   # 左对齐
 		)
 		self.preview_before_info.set('')
@@ -3225,7 +3231,7 @@ class ImageToolApp:
 		self.preview_after_label.configure(
 			text=error_text,
 			image='',
-			wraplength=380,  # 设置文本换行宽度
+			wraplength=400,  # 设置文本换行宽度，匹配新的窗口大小
 			justify='left',  # 左对齐
 			anchor='nw'      # 内容对齐到左上角
 		)
