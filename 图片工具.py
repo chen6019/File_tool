@@ -215,7 +215,11 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 						im=im.convert('P',palette=Image.ADAPTIVE,colors=256)
 				elif fmt=='webp':
 					params['quality']=quality or 80
-				im.save(dst, fmt.upper(), **params)
+				# 修复Pillow格式名称映射
+				pillow_fmt = fmt.upper()
+				if pillow_fmt == 'JPG':
+					pillow_fmt = 'JPEG'
+				im.save(dst, pillow_fmt, **params)
 		return True,'OK'
 	except PermissionError as e:
 		return False, f"权限不足: {str(e)}"
@@ -1984,8 +1988,10 @@ class ImageToolApp:
 								# 转换成功的情况：在同一目录内重命名
 								os.rename(convert_path, final_path)
 							elif not ok_convert and os.path.exists(src):
-								# 转换失败但需要重命名：直接从源文件复制到最终路径
-								shutil.copy2(src, final_path)
+								# 转换失败但需要重命名：需要使用原文件扩展名构建正确的目标路径
+								src_ext = os.path.splitext(src)[1]
+								final_path_with_orig_ext = os.path.splitext(final_path)[0] + src_ext
+								shutil.copy2(src, final_path_with_orig_ext)
 								msg_rename='转换失败，原样重命名(预览)'
 							else:
 								raise FileNotFoundError(f"转换结果文件不存在且源文件无法访问")
@@ -2004,10 +2010,14 @@ class ImageToolApp:
 							os.replace(convert_path,final_path)
 							ok_rename=True; msg_rename='命名'
 						elif not ok_convert and os.path.exists(src):
-							# 转换失败但需要重命名：直接从源文件复制到最终路径
-							os.makedirs(os.path.dirname(final_path), exist_ok=True)
-							shutil.copy2(src, final_path)
+							# 转换失败但需要重命名：需要使用原文件扩展名构建正确的目标路径
+							src_ext = os.path.splitext(src)[1]
+							final_path_with_orig_ext = os.path.splitext(final_path)[0] + src_ext
+							os.makedirs(os.path.dirname(final_path_with_orig_ext), exist_ok=True)
+							shutil.copy2(src, final_path_with_orig_ext)
 							ok_rename=True; msg_rename='转换失败，原样重命名'
+							# 更新final_path以反映实际保存的位置
+							final_path = final_path_with_orig_ext
 						else:
 							raise FileNotFoundError(f"转换结果文件不存在且源文件无法访问")
 					except PermissionError as e:
