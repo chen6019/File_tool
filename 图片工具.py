@@ -426,27 +426,47 @@ def convert_one(src,dst,fmt,quality=None,png3=False,ico_sizes=None,square_mode=N
 						
 				elif fmt=='webp':
 					params['quality']=quality or 80
-					params['method'] = 4  # 使用中等压缩方法，平衡质量和速度
 					
 					# WebP格式：支持动画
 					if is_animated:
 						params['save_all'] = True
 						params['minimize_size'] = False  # 不优化文件大小，确保帧完整性
 						
+						# 根据帧数和文件大小选择最佳的WebP编码策略
+						# 通过测试发现：WebP在某些参数组合下会丢失帧数
+						# 安全策略：对于中高帧数都使用无损或接近无损的设置
+						
+						if original_frames > 100 or file_size > 10*1024*1024:  # >100帧或>10MB
+							# 使用无损压缩确保帧完整性
+							params['lossless'] = True
+							params['method'] = 6  # 最佳压缩方法
+							params['exact'] = True  # 精确模式
+							print(f"使用WebP无损压缩处理{original_frames}帧动画")
+						elif original_frames > 50:
+							# 中等帧数：使用接近无损的高质量压缩
+							params['quality'] = 100  # 最高质量
+							params['method'] = 6     # 最佳方法
+							params['lossless'] = False
+							params['exact'] = True   # 精确模式
+							print(f"使用WebP最高质量压缩处理{original_frames}帧动画")
+						else:
+							# 低帧数：使用标准压缩
+							params['method'] = 4  # 平衡的压缩方法
+							params['quality'] = params['quality']  # 保持用户设定的质量
+						
 						# 保留动画的时间间隔和循环信息
 						try:
 							if hasattr(im, 'info'):
 								if 'duration' in im.info:
-									params['duration'] = im.info['duration']
+									duration = im.info['duration']
+									if isinstance(duration, (list, tuple)):
+										params['duration'] = duration
+									else:
+										params['duration'] = max(1, int(duration))  # 确保至少1ms
 								if 'loop' in im.info:
 									params['loop'] = im.info['loop']
 						except Exception:
 							pass
-							
-						# 对于高帧数WebP，使用更保守的设置
-						if original_frames > 150 or conservative_mode:
-							params['method'] = 0  # 最快的压缩方法
-							params['quality'] = min(params['quality'], 90)  # 限制质量以节省内存
 				
 				# 修复Pillow格式名称映射
 				pillow_fmt = fmt.upper()
